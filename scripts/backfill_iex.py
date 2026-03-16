@@ -35,8 +35,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import mean
 
-import pandas as pd
-
 sys.path.insert(0, str(Path(__file__).parent))
 from config import CSV_PATHS
 
@@ -661,6 +659,7 @@ def _scrape_hourly_chunk_paginated(
                 download.save_as(tmp_path)
                 print(f"[{label}] Downloaded: {tmp_path} ({download.suggested_filename})")
 
+                import pandas as pd  # lazy import — not needed by generate_backfill_matrix.py
                 if suffix in (".xlsx", ".xls"):
                     df = pd.read_excel(tmp_path, header=0, dtype=str)
                 else:
