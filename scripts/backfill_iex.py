@@ -35,6 +35,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import mean
 
+import pandas as pd
+
 sys.path.insert(0, str(Path(__file__).parent))
 from config import CSV_PATHS
 
@@ -634,111 +636,136 @@ def _scrape_hourly_chunk_paginated(
                 pass
             page.wait_for_timeout(1500)
 
-            # 3b. Maximize rows-per-page in MUI TablePagination so all hourly rows
-            #     for each day are visible at once (default may be 1 or very low)
-            try:
-                rows_select = page.locator(
-                    ".MuiTablePagination-select, "
-                    "tfoot select, "
-                    "div[class*='TablePagination'] select, "
-                    "div[class*='tablePagination'] select"
-                ).first
-                if rows_select.is_visible(timeout=3000):
-                    options = rows_select.locator("option").all()
-                    opt_vals = [o.get_attribute("value") for o in options]
-                    print(f"[{label}] Rows-per-page options: {opt_vals}")
-                    best = None
-                    best_num = 0
-                    for v in opt_vals:
-                        try:
-                            n = int(v)
-                            if n > best_num:
-                                best_num = n
-                                best = v
-                        except Exception:
-                            if v and v.lower() in ("all", "-1"):
-                                best = v
-                                break
-                    if best:
-                        rows_select.select_option(best)
-                        page.wait_for_timeout(1500)
-                        print(f"[{label}] Set rows-per-page to {best}")
-                        page.screenshot(
-                            path=f"/tmp/iex_{label.lower()}_step3b_rowsperpage.png",
-                            full_page=True,
-                        )
-                else:
-                    print(f"[{label}] rows-per-page selector not visible")
-            except Exception as e:
-                print(f"[{label}] rows-per-page selector not found: {e}")
-
-            # 4. Parse table — accumulate rows grouped by date
-            #    Works for both paginated (one day/page) and non-paginated (all rows)
+            # 4. Click Export button to download full hourly dataset.
+            #    The exported file contains all 24 hourly rows per day — unlike
+            #    table pagination which only returns daily aggregate data for
+            #    historical -Select Range- queries.
             solar_by_date:    defaultdict[date, list[float]] = defaultdict(list)
             nonsolar_by_date: defaultdict[date, list[float]] = defaultdict(list)
-            page_num = 0
 
-            while True:
-                page_num += 1
-                headers, data = _parse_main_table(page)
+            try:
+                export_btn = page.locator(
+                    "button:has-text('Export'), "
+                    "button:has-text('export'), "
+                    "[aria-label*='xport'], "
+                    "[title*='xport']"
+                ).first
+                export_btn.wait_for(state="visible", timeout=10000)
 
-                date_col = _col_index(headers, "Date")
-                hour_col = next(
-                    (i for i, h in enumerate(headers) if h.strip().lower() == "hour"),
+                with page.expect_download(timeout=60000) as dl_info:
+                    export_btn.click()
+
+                download = dl_info.value
+                suffix = Path(download.suggested_filename).suffix.lower() or ".csv"
+                tmp_path = f"/tmp/iex_{label.lower()}_hourly_{start}{suffix}"
+                download.save_as(tmp_path)
+                print(f"[{label}] Downloaded: {tmp_path} ({download.suggested_filename})")
+
+                if suffix in (".xlsx", ".xls"):
+                    df = pd.read_excel(tmp_path, header=0, dtype=str)
+                else:
+                    df = pd.read_csv(tmp_path, header=0, dtype=str)
+
+                headers_dl = [str(c).strip() for c in df.columns]
+                print(f"[{label}] Download columns: {headers_dl}")
+
+                date_col_dl = next(
+                    (h for h in headers_dl if "date" in h.lower()), None
+                )
+                hour_col_dl = next(
+                    (h for h in headers_dl if h.strip().lower() == "hour"), None
+                )
+                mcp_col_dl = next(
+                    (h for h in headers_dl
+                     if "mcp" in h.upper() and "weighted" not in h.lower()),
                     None,
                 )
-                mcp_col = _col_index(headers, "MCP")
 
-                if date_col is None or hour_col is None or mcp_col is None:
-                    print(f"[{label}] Hourly page {page_num}: missing cols {headers}")
-                    if page_num == 1:
+                if not all([date_col_dl, hour_col_dl, mcp_col_dl]):
+                    print(f"[{label}] Download missing cols: {headers_dl}")
+                else:
+                    current_date_dl = None
+                    for _, row in df.iterrows():
+                        d_str = str(row[date_col_dl]).strip()
+                        if d_str and d_str.lower() not in ("nan", "none", ""):
+                            parsed = _parse_iex_date(d_str)
+                            if parsed is not None:
+                                current_date_dl = parsed
+                        d = current_date_dl
+                        if d is None or not (start <= d <= end):
+                            continue
                         try:
-                            page.screenshot(
-                                path=f"/tmp/iex_{label.lower()}_hourly_nocols_{start}.png",
-                                full_page=True,
-                            )
+                            hour = int(str(row[hour_col_dl]).strip())
                         except Exception:
-                            pass
-                    break
+                            continue
+                        mcp = _parse_float(str(row[mcp_col_dl]))
+                        if mcp is None:
+                            continue
+                        mcp_unit = mcp / 1000
+                        if hour in SOLAR_HOURS:
+                            solar_by_date[d].append(mcp_unit)
+                        elif hour in NONSOLAR_HOURS:
+                            nonsolar_by_date[d].append(mcp_unit)
 
-                rows_this_page = 0
-                current_date = None  # propagate date to rows with empty Date cell
-                for row in data:
-                    if max(date_col, hour_col, mcp_col) >= len(row):
-                        continue
-                    d_str = row[date_col].strip()
-                    if d_str:
-                        # Update current_date when the Date cell is filled (first row of each day)
-                        parsed = _parse_iex_date(d_str)
-                        if parsed is not None:
-                            current_date = parsed
-                    d = current_date  # use last-seen date for rows with empty Date cell
-                    if d is None or not (start <= d <= end):
-                        continue
-                    try:
-                        hour = int(row[hour_col].strip())
-                    except Exception:
-                        continue
-                    mcp = _parse_float(row[mcp_col])
-                    if mcp is None:
-                        continue
-                    mcp_unit = mcp / 1000
-                    if hour in SOLAR_HOURS:
-                        solar_by_date[d].append(mcp_unit)
-                    elif hour in NONSOLAR_HOURS:
-                        nonsolar_by_date[d].append(mcp_unit)
-                    rows_this_page += 1
+                    dates_seen = sorted(set(solar_by_date) | set(nonsolar_by_date))
+                    print(
+                        f"[{label}] Download parsed: {len(dates_seen)} dates, "
+                        f"solar={sum(len(v) for v in solar_by_date.values())} hourly rows, "
+                        f"nonsolar={sum(len(v) for v in nonsolar_by_date.values())} hourly rows"
+                    )
 
-                dates_seen = sorted(set(solar_by_date) | set(nonsolar_by_date))
-                print(
-                    f"[{label}] Hourly page {page_num}: {rows_this_page} rows, "
-                    f"{len(dates_seen)} dates so far "
-                    f"({dates_seen[0] if dates_seen else '?'} … "
-                    f"{dates_seen[-1] if dates_seen else '?'})"
-                )
-
-                if not _click_next_page(page, label):
-                    break  # Last page or non-paginated table
+            except Exception as e:
+                print(f"[{label}] Export download failed: {e} — falling back to pagination")
+                try:
+                    page.screenshot(
+                        path=f"/tmp/iex_{label.lower()}_export_err_{start}.png",
+                        full_page=True,
+                    )
+                except Exception:
+                    pass
+                # Fallback: original row-by-row pagination
+                page_num = 0
+                while True:
+                    page_num += 1
+                    headers_pg, data = _parse_main_table(page)
+                    date_col = _col_index(headers_pg, "Date")
+                    hour_col = next(
+                        (i for i, h in enumerate(headers_pg)
+                         if h.strip().lower() == "hour"),
+                        None,
+                    )
+                    mcp_col = _col_index(headers_pg, "MCP")
+                    if date_col is None or hour_col is None or mcp_col is None:
+                        break
+                    rows_this_page = 0
+                    current_date = None
+                    for row in data:
+                        if max(date_col, hour_col, mcp_col) >= len(row):
+                            continue
+                        d_str = row[date_col].strip()
+                        if d_str:
+                            parsed = _parse_iex_date(d_str)
+                            if parsed is not None:
+                                current_date = parsed
+                        d = current_date
+                        if d is None or not (start <= d <= end):
+                            continue
+                        try:
+                            hour = int(row[hour_col].strip())
+                        except Exception:
+                            continue
+                        mcp = _parse_float(row[mcp_col])
+                        if mcp is None:
+                            continue
+                        mcp_unit = mcp / 1000
+                        if hour in SOLAR_HOURS:
+                            solar_by_date[d].append(mcp_unit)
+                        elif hour in NONSOLAR_HOURS:
+                            nonsolar_by_date[d].append(mcp_unit)
+                        rows_this_page += 1
+                    print(f"[{label}] Fallback page {page_num}: {rows_this_page} rows")
+                    if not _click_next_page(page, label):
+                        break
 
             # 5. Compute per-date averages from all accumulated MCPs
             for d in set(solar_by_date) | set(nonsolar_by_date):
