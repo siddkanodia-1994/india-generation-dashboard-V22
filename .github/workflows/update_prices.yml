@@ -37,17 +37,29 @@ jobs:
       - name: Install Playwright browsers (Chromium only)
         run: playwright install chromium --with-deps
 
-      - name: Run prices scrapers (RTM + DAM + Stocks)
+      - name: Run stocks scraper
         run: |
           cd scripts
-          python run_all.py --mode prices
+          python scrape_stocks.py
+        continue-on-error: false
+
+      - name: Run RTM scraper
+        run: |
+          cd scripts
+          python scrape_iex_rtm.py
+        continue-on-error: true   # Don't block if IEX is unavailable
+
+      - name: Run DAM scraper
+        run: |
+          cd scripts
+          python scrape_iex_dam.py
+        continue-on-error: true   # Don't block if IEX is unavailable
 
       - name: Commit and push updated data
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add public/data/
-          # Only commit if there are actual changes
           if git diff --cached --quiet; then
             echo "No data changes to commit."
           else

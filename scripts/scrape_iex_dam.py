@@ -74,7 +74,21 @@ def _iex_date_param(d: date) -> str:
     return d.strftime("%d-%b-%Y")
 
 
-def _make_session() -> requests.Session:
+def _make_session():
+    """curl_cffi with Chrome TLS fingerprint to bypass bot detection."""
+    try:
+        from curl_cffi import requests as cffi_requests
+        s = cffi_requests.Session(impersonate="chrome124")
+        s.headers.update(BROWSER_HEADERS)
+        try:
+            s.get(IEX_BASE, timeout=15)
+            time.sleep(1)
+        except Exception:
+            pass
+        return s
+    except ImportError:
+        pass
+
     s = requests.Session()
     s.headers.update(BROWSER_HEADERS)
     try:

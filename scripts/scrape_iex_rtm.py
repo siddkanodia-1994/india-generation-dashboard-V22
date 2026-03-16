@@ -98,11 +98,26 @@ def _iex_date_param_slash(d: date) -> str:
     return d.strftime("%d/%m/%Y")
 
 
-def _make_session() -> requests.Session:
-    """Create a session that looks like a real browser, including visiting homepage first."""
+def _make_session():
+    """
+    Create a session using curl_cffi (Chrome TLS fingerprint) if available,
+    otherwise fall back to requests. curl_cffi bypasses bot detection.
+    """
+    try:
+        from curl_cffi import requests as cffi_requests
+        s = cffi_requests.Session(impersonate="chrome124")
+        s.headers.update(BROWSER_HEADERS)
+        try:
+            s.get(IEX_BASE, timeout=15)
+            time.sleep(1)
+        except Exception:
+            pass
+        return s
+    except ImportError:
+        pass
+
     s = requests.Session()
     s.headers.update(BROWSER_HEADERS)
-    # Visit homepage to get cookies
     try:
         s.get(IEX_BASE, timeout=15)
         time.sleep(1)
