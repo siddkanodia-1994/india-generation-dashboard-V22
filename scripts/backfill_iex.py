@@ -213,19 +213,69 @@ def _click_dropdown_and_select(page, combo_index: int, option_text: str, label: 
         return True
     except Exception as e:
         print(f"[{label}] Dropdown select failed ({combo_index}, '{option_text}'): {e}")
+        # Close the dropdown cleanly so the next call opens it fresh
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+        except Exception:
+            pass
         return False
 
 
 def _set_custom_date_range(page, start: date, end: date, label: str) -> bool:
     """
-    Select 'Custom' from Delivery Period, fill in start/end dates, click Update Report.
+    Select 'Custom' (or variant) from Delivery Period, fill in start/end dates, click Update Report.
     IEX shows two date inputs when Custom is selected.
     """
-    # Step 1: select "Custom" from delivery period dropdown (combobox[1])
-    if not _click_dropdown_and_select(page, 1, "Custom", label):
-        print(f"[{label}] Could not select 'Custom' delivery period")
+    # Step 1: open the delivery period dropdown (combobox[1]) and find the Custom option
+    try:
+        combos = page.locator("[role='combobox']").all()
+        if len(combos) < 2:
+            print(f"[{label}] Only {len(combos)} comboboxes found, need at least 2")
+            return False
+        combos[1].click()
+        page.wait_for_timeout(800)
+
+        # Enumerate all visible options to aid debugging
+        all_opts = page.locator("[role='option'], li[role='option']").all()
+        opt_texts = [o.inner_text().strip() for o in all_opts]
+        print(f"[{label}] Delivery period options: {opt_texts}")
+        page.screenshot(path=f"/tmp/iex_{label.lower()}_step1_opts.png")
+
+        # Try candidate labels in order of likelihood
+        selected = False
+        for candidate in ["Custom", "Custom Range", "Custom Date Range", "Select Custom", "Customised"]:
+            opt = page.locator(
+                f"[role='option']:has-text('{candidate}'), li:has-text('{candidate}')"
+            ).first
+            try:
+                if opt.is_visible(timeout=1000):
+                    opt.click()
+                    print(f"[{label}] Selected custom variant '{candidate}'")
+                    selected = True
+                    break
+            except Exception:
+                continue
+
+        if not selected:
+            print(f"[{label}] Could not find any Custom option in: {opt_texts}")
+            try:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(300)
+            except Exception:
+                pass
+            return False
+    except Exception as e:
+        print(f"[{label}] Could not open delivery period dropdown: {e}")
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+        except Exception:
+            pass
         return False
+
     page.wait_for_timeout(800)
+    page.screenshot(path=f"/tmp/iex_{label.lower()}_step2_custom_selected.png")
 
     start_str = _format_date_iex(start)  # DD-MM-YYYY
     end_str   = _format_date_iex(end)
@@ -296,6 +346,7 @@ def _set_custom_date_range(page, start: date, end: date, label: str) -> bool:
     except Exception:
         pass
     page.wait_for_timeout(2000)
+    page.screenshot(path=f"/tmp/iex_{label.lower()}_step3_table.png")
     return True
 
 
@@ -340,11 +391,12 @@ def _col_index(headers: list[str], keyword: str) -> int | None:
 def _scrape_daily_chunk(
     url: str, interval: str, start: date, end: date,
     label: str, use_custom: bool
-) -> tuple[list[str], list[list[str]]]:
+) -> tuple[list[str], list[list[str]], bool]:
     """
-    Navigate to url, set interval, set date range, return (headers, rows).
+    Navigate to url, set interval, set date range, return (headers, rows, custom_succeeded).
     use_custom=True  → select Custom delivery period + fill date inputs
     use_custom=False → select "Last 31 Days" from dropdown
+    custom_succeeded=True means date filter should apply; False means accept all returned dates.
     """
     from playwright.sync_api import sync_playwright
 
@@ -357,12 +409,15 @@ def _scrape_daily_chunk(
             # Set interval (combobox[0])
             if not _click_dropdown_and_select(page, 0, interval, label):
                 print(f"[{label}] Could not select interval '{interval}'")
-                return [], []
+                return [], [], False
             _wait_for_table(page)
+            page.screenshot(path=f"/tmp/iex_{label.lower()}_{start}_interval.png")
 
             # Set delivery period
+            custom_ok = False
             if use_custom:
-                if not _set_custom_date_range(page, start, end, label):
+                custom_ok = _set_custom_date_range(page, start, end, label)
+                if not custom_ok:
                     print(f"[{label}] Custom date range failed; trying Last 31 Days fallback")
                     _click_dropdown_and_select(page, 1, "Last 31 Days", label)
             else:
@@ -371,13 +426,13 @@ def _scrape_daily_chunk(
             _wait_for_table(page)
 
             headers, data = _parse_main_table(page)
-            print(f"[{label}] {interval} {start}→{end}: headers={headers}, rows={len(data)}")
+            print(f"[{label}] {interval} {start}→{end}: headers={headers}, rows={len(data)}, custom_ok={custom_ok}")
 
             if not headers:
                 page.screenshot(
                     path=f"/tmp/iex_{label.lower()}_backfill_{start}.png", full_page=True
                 )
-            return headers, data
+            return headers, data, custom_ok
 
         except Exception as e:
             print(f"[{label}] _scrape_daily_chunk exception: {e}")
@@ -387,7 +442,7 @@ def _scrape_daily_chunk(
                 )
             except Exception:
                 pass
-            return [], []
+            return [], [], False
         finally:
             browser.close()
 
@@ -406,9 +461,8 @@ def scrape_daily_range(
     result: dict[date, float] = {}
 
     for chunk_start, chunk_end in chunks:
-        use_custom = True  # always use custom date range for backfill
-        headers, data = _scrape_daily_chunk(
-            url, "Daily", chunk_start, chunk_end, label, use_custom
+        headers, data, custom_ok = _scrape_daily_chunk(
+            url, "Daily", chunk_start, chunk_end, label, use_custom=True
         )
         if not headers or not data:
             print(f"[{label}] No data for chunk {chunk_start}→{chunk_end}")
@@ -420,15 +474,22 @@ def scrape_daily_range(
             print(f"[{label}] Missing Date/MCP cols: {headers}")
             continue
 
+        before = len(result)
         for row in data:
             if max(date_col, mcp_col) >= len(row):
                 continue
             d   = _parse_iex_date(row[date_col])
             mcp = _parse_float(row[mcp_col])
-            if d and mcp and chunk_start <= d <= chunk_end:
-                result[d] = round(mcp / 1000, 4)
+            if d is None or mcp is None:
+                continue
+            # When custom succeeded, restrict to the requested chunk range.
+            # When falling back to Last 31 Days, accept all returned dates
+            # and let _merge_rows (existing-wins) handle deduplication.
+            if custom_ok and not (chunk_start <= d <= chunk_end):
+                continue
+            result[d] = round(mcp / 1000, 4)
 
-        print(f"[{label}] Chunk {chunk_start}→{chunk_end}: got {len([d for d in result if chunk_start <= d <= chunk_end])} dates")
+        print(f"[{label}] Chunk {chunk_start}→{chunk_end}: got {len(result) - before} new dates")
         time.sleep(2)  # be polite between chunks
 
     return result
@@ -445,7 +506,7 @@ def scrape_hourly_range(
     result: dict[date, tuple[float | None, float | None]] = {}
 
     for chunk_start, chunk_end in chunks:
-        headers, data = _scrape_daily_chunk(
+        headers, data, custom_ok = _scrape_daily_chunk(
             url, "Hourly", chunk_start, chunk_end, label, use_custom=True
         )
         if not headers or not data:
@@ -472,7 +533,10 @@ def scrape_hourly_range(
                 d = _parse_iex_date(raw_date)
                 if d:
                     current_date = d
-            if current_date is None or not (chunk_start <= current_date <= chunk_end):
+            if current_date is None:
+                continue
+            # Same logic: apply date filter only when custom succeeded
+            if custom_ok and not (chunk_start <= current_date <= chunk_end):
                 continue
             try:
                 hour = int(row[hour_col].strip())
