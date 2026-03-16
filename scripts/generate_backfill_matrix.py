@@ -60,15 +60,7 @@ def main() -> None:
     parser.add_argument(
         "--skip-existing",
         action="store_true",
-        help="Omit date chunks already present in the CSV",
-    )
-    parser.add_argument(
-        "--force-solar",
-        action="store_true",
-        help=(
-            "RTM only: overwrite solar/nonsolar for ALL dates. "
-            "Implies all RTM chunks are included (skip-existing ignored for RTM)."
-        ),
+        help="Omit date chunks where all dates are already present in the CSV",
     )
     args = parser.parse_args()
 
@@ -84,10 +76,7 @@ def main() -> None:
 
     matrix_items: list[dict] = []
     for market in markets:
-        # force_solar on RTM means we must process ALL chunks regardless of existing data
-        force_this = args.force_solar and market == "rtm"
-
-        if args.skip_existing and not force_this:
+        if args.skip_existing:
             chunks = _missing_chunks(CSV_PATHS[market], start, end)
             print(
                 f"[{market.upper()}] {len(chunks)} chunks with missing dates "
@@ -96,19 +85,17 @@ def main() -> None:
             )
         else:
             chunks = _date_chunks(start, end)
-            reason = "force-solar" if force_this else "no skip"
             print(
-                f"[{market.upper()}] {len(chunks)} chunks (all, {reason})",
+                f"[{market.upper()}] {len(chunks)} chunks (all)",
                 file=sys.stderr,
             )
 
         for chunk_start, chunk_end in chunks:
             matrix_items.append(
                 {
-                    "market":      market,
-                    "start":       str(chunk_start),
-                    "end":         str(chunk_end),
-                    "force_solar": "true" if force_this else "false",
+                    "market": market,
+                    "start":  str(chunk_start),
+                    "end":    str(chunk_end),
                 }
             )
 
@@ -117,7 +104,7 @@ def main() -> None:
 
     # GitHub Actions requires at least one matrix item; use a sentinel if empty
     if not matrix_items:
-        matrix_items = [{"market": "none", "start": "skip", "end": "skip", "force_solar": "false"}]
+        matrix_items = [{"market": "none", "start": "skip", "end": "skip"}]
 
     matrix_json = json.dumps({"include": matrix_items})
 

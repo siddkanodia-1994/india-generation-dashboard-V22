@@ -1,8 +1,6 @@
 name: Backfill IEX Historical Data (Parallel)
 
-# ── Triggers ──────────────────────────────────────────────────────────────────
 on:
-  # Manual trigger with options
   workflow_dispatch:
     inputs:
       market:
@@ -20,24 +18,16 @@ on:
         required: false
         default: ""
       skip_existing:
-        description: "Skip dates already in CSV (auto-detect gaps only)"
+        description: "Skip chunks where all dates already have complete data"
         required: false
         default: "true"
         type: choice
         options: ["true", "false"]
-      force_solar:
-        description: "RTM: overwrite solar/nonsolar for ALL dates (fixes wrong historical values)"
-        required: false
-        default: "false"
-        type: choice
-        options: ["false", "true"]
 
-  # Automatic weekly run — fills any gaps without manual intervention
-  # Runs every Sunday at 01:00 UTC (06:30 IST)
+  # Weekly auto-run: fills any new gaps
   schedule:
     - cron: "0 1 * * 0"
 
-# ── Job 1: Generate chunk matrix ──────────────────────────────────────────────
 jobs:
   generate-matrix:
     name: Detect missing date chunks
@@ -47,15 +37,12 @@ jobs:
       count:  ${{ steps.gen.outputs.count }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # Only needs stdlib — no heavy deps required for matrix generation
       - name: Resolve end date
         id: dates
         run: |
@@ -69,19 +56,7 @@ jobs:
         id: gen
         run: |
           SKIP_FLAG=""
-          FORCE_SOLAR_FLAG=""
-
           INPUT_SKIP="${{ github.event.inputs.skip_existing }}"
-          INPUT_FORCE="${{ github.event.inputs.force_solar }}"
-
-          # force_solar=true implies we process all RTM chunks (no skip for RTM)
-          if [ "$INPUT_FORCE" = "true" ]; then
-            FORCE_SOLAR_FLAG="--force-solar"
-            # Still skip DAM existing dates; force-solar handles RTM skip internally
-            INPUT_SKIP="true"
-          fi
-
-          # Default to skip_existing=true for scheduled runs
           if [ "$INPUT_SKIP" = "true" ] || [ -z "$INPUT_SKIP" ]; then
             SKIP_FLAG="--skip-existing"
           fi
@@ -92,16 +67,12 @@ jobs:
           START="${{ github.event.inputs.start_date }}"
           if [ -z "$START" ]; then START="2022-04-01"; fi
 
-          # Run generator — writes "matrix=..." and "count=..." lines to stdout
           cd scripts && python generate_backfill_matrix.py \
             --market "$MARKET" \
             --start-date "$START" \
             --end-date "${{ steps.dates.outputs.end_date }}" \
-            $SKIP_FLAG $FORCE_SOLAR_FLAG >> $GITHUB_OUTPUT
+            $SKIP_FLAG >> $GITHUB_OUTPUT
 
-          echo "Matrix generation complete"
-
-# ── Job 2: Parallel backfill chunks ───────────────────────────────────────────
   backfill-chunk:
     name: "Backfill ${{ matrix.market }} ${{ matrix.start }} → ${{ matrix.end }}"
     needs: generate-matrix
@@ -111,63 +82,48 @@ jobs:
 
     strategy:
       matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
-      max-parallel: 10   # Run 10 chunks simultaneously
-      fail-fast: false   # Let other chunks continue if one fails
+      max-parallel: 10
+      fail-fast: false
 
     steps:
-      # ── Skip sentinel items (no missing data case) ──────────────────────────
       - name: Check for sentinel
         if: matrix.market == 'none'
-        run: |
-          echo "No missing data detected — nothing to backfill."
-          exit 0
+        run: echo "No missing data — nothing to backfill." && exit 0
 
-      # ── Setup ───────────────────────────────────────────────────────────────
-      - name: Checkout repository
+      - uses: actions/checkout@v4
         if: matrix.market != 'none'
-        uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Python 3.11
+      - uses: actions/setup-python@v5
         if: matrix.market != 'none'
-        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Cache pip packages
+      - uses: actions/cache@v4
         if: matrix.market != 'none'
-        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-${{ hashFiles('scripts/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+          restore-keys: ${{ runner.os }}-pip-
 
       - name: Install Python dependencies
         if: matrix.market != 'none'
         run: pip install -r scripts/requirements.txt
 
-      - name: Install Playwright browsers (Chromium only)
+      - name: Install Playwright browsers
         if: matrix.market != 'none'
         run: playwright install chromium --with-deps
 
-      # ── Scrape ──────────────────────────────────────────────────────────────
       - name: Run backfill chunk
         if: matrix.market != 'none'
         run: |
-          FORCE_FLAG=""
-          if [ "${{ matrix.force_solar }}" = "true" ]; then
-            FORCE_FLAG="--force-solar"
-          fi
           cd scripts
           python backfill_iex.py \
             --market "${{ matrix.market }}" \
             --start-date "${{ matrix.start }}" \
-            --end-date "${{ matrix.end }}" \
-            $FORCE_FLAG
+            --end-date "${{ matrix.end }}"
 
-      # ── Debug artifacts ─────────────────────────────────────────────────────
       - name: Upload debug screenshots
         if: always() && matrix.market != 'none'
         uses: actions/upload-artifact@v4
@@ -176,7 +132,6 @@ jobs:
           path: /tmp/iex_*.png
           if-no-files-found: ignore
 
-      # ── Commit with rebase retry (handles concurrent pushes from parallel jobs)
       - name: Commit and push chunk data
         if: matrix.market != 'none'
         run: |
@@ -191,14 +146,12 @@ jobs:
 
           git commit -m "auto: backfill ${{ matrix.market }} ${{ matrix.start }} → ${{ matrix.end }}"
 
-          # Retry push up to 5 times with exponential back-off + rebase
-          # (other parallel jobs may have pushed between our checkout and push)
           for attempt in 1 2 3 4 5; do
             if git push; then
               echo "Push succeeded on attempt $attempt"
               break
             fi
-            echo "Push attempt $attempt failed — rebasing and retrying..."
+            echo "Push attempt $attempt failed — rebasing..."
             git pull --rebase origin main
             sleep $((attempt * 10))
           done
