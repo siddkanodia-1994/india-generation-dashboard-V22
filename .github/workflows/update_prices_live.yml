@@ -1,0 +1,62 @@
+name: Live Prices Update (Hourly - Today)
+
+on:
+  schedule:
+    # Every hour at :00 UTC (≈ every hour IST, offset by 30 min)
+    - cron: "0 * * * *"
+  workflow_dispatch:   # Allow manual trigger for testing
+
+jobs:
+  live-prices:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('scripts/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Install Playwright browsers (Chromium only)
+        run: playwright install chromium --with-deps
+
+      - name: Run RTM live scraper (Today)
+        run: |
+          cd scripts
+          python scrape_iex_rtm.py --period today
+        continue-on-error: true   # Don't block if IEX is temporarily unavailable
+
+      - name: Run DAM live scraper (Today)
+        run: |
+          cd scripts
+          python scrape_iex_dam.py --period today
+        continue-on-error: true   # Don't block if IEX is temporarily unavailable
+
+      - name: Commit and push live data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/data/
+          if git diff --cached --quiet; then
+            echo "No data changes to commit."
+          else
+            git commit -m "auto: live prices $(date -u +'%Y-%m-%dT%H:%M')Z"
+            git push
+          fi

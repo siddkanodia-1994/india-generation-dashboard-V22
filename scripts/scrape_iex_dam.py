@@ -1,58 +1,54 @@
 """
-Scrape IEX Day-Ahead Market (DAM) data and append to DAM Prices.csv.
+Scrape IEX Day-Ahead Market (DAM) data via Playwright UI simulation.
 
-Column written: Date, DAM price (daily weighted avg MCP in Rs/Unit)
+Usage:
+  python scrape_iex_dam.py                   # yesterday's finalized data (nightly cron)
+  python scrape_iex_dam.py --period today    # today's live partial data (hourly cron)
+
+Column written to DAM Prices.csv:
+  Date, DAM price (daily avg MCP Rs/Unit)
 
 Strategy:
-  1. Try IEX internal API endpoints directly.
-  2. Fall back to Playwright stealth mode.
+  - Navigate to IEX DAM page
+  - Click "Daily" interval tab → select delivery period → parse HTML table → MCP ÷ 1000
+  - For "Yesterday": append row if not already present
+  - For "Today": upsert (overwrite today's row if exists, else append)
 """
 
+import argparse
 import csv
-import json
-import re
 import sys
-import time
 from datetime import date, timedelta
 from pathlib import Path
 from statistics import mean
 
-import requests
-
 sys.path.insert(0, str(Path(__file__).parent))
 from config import CSV_PATHS
 
-IEX_BASE = "https://www.iexindia.com"
-
-IEX_DAM_ENDPOINTS = [
-    f"{IEX_BASE}/Modules/MarketData/DAM/frmDAMMarketSnapshot.aspx/GetDAMMarketSummary",
-    f"{IEX_BASE}/api/MarketData/DAM/GetDAMMarketSummary",
-    f"{IEX_BASE}/api/dam/summary",
-    f"{IEX_BASE}/MarketData/DAM/GetMarketSummary",
-]
-
-BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "en-US,en;q=0.9",
-    "X-Requested-With": "XMLHttpRequest",
-    "Referer": f"{IEX_BASE}/market-data/day-ahead-market/market-snapshot",
-    "Origin": IEX_BASE,
-}
+IEX_DAM_URL = "https://www.iexindia.com/market-data/day-ahead-market/market-snapshot"
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── CSV helpers ───────────────────────────────────────────────────────────────
 
-def _last_date_in_csv(path: str) -> date | None:
+def _read_csv(path: str) -> list[list[str]]:
     p = Path(path)
     if not p.exists():
-        return None
+        return []
     with open(p, newline="") as f:
-        rows = list(csv.reader(f))
-    data_rows = [r for r in rows if r and not r[0].startswith("Date")]
+        return list(csv.reader(f))
+
+
+def _write_csv(path: str, rows: list[list[str]]) -> None:
+    with open(path, "w", newline="") as f:
+        csv.writer(f).writerows(rows)
+
+
+def _format_date(d: date) -> str:
+    return d.strftime("%d/%m/%y")
+
+
+def _last_data_date(rows: list[list[str]]) -> date | None:
+    data_rows = [r for r in rows if r and not r[0].strip().lower().startswith("date")]
     if not data_rows:
         return None
     last = data_rows[-1][0].strip()
@@ -66,241 +62,194 @@ def _last_date_in_csv(path: str) -> date | None:
         return None
 
 
-def _format_date(d: date) -> str:
-    return d.strftime("%d/%m/%y")
+def _upsert_row(rows: list[list[str]], target_date: date, new_row: list) -> list[list[str]]:
+    """Replace existing row for target_date, or append if not found."""
+    target_str = _format_date(target_date)
+    for i, row in enumerate(rows):
+        if row and row[0].strip() == target_str:
+            rows[i] = new_row
+            print(f"[DAM] Updated existing row for {target_str}")
+            return rows
+    rows.append(new_row)
+    print(f"[DAM] Appended new row for {target_str}")
+    return rows
 
 
-def _iex_date_param(d: date) -> str:
-    return d.strftime("%d-%b-%Y")
+# ── Playwright helpers ────────────────────────────────────────────────────────
+
+def _make_browser_context(pw):
+    browser = pw.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+        ],
+    )
+    context = browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1280, "height": 800},
+        locale="en-IN",
+    )
+    context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+    )
+    return browser, context
 
 
-def _make_session():
-    """curl_cffi with Chrome TLS fingerprint to bypass bot detection."""
+def _select_interval_and_period(page, interval: str, period: str) -> None:
+    """Click an interval tab then select the delivery period from the dropdown."""
+    tab_selector = (
+        f"button:has-text('{interval}'), "
+        f"[role='tab']:has-text('{interval}')"
+    )
+    page.wait_for_selector(tab_selector, timeout=30000)
+    page.locator(tab_selector).first.click()
+    page.wait_for_timeout(1500)
+
+    combo = page.locator("[role='combobox']").first
+    combo.click()
+    page.wait_for_timeout(500)
+    page.locator(f"[role='option']:has-text('{period}')").first.click()
+
+    page.wait_for_load_state("networkidle", timeout=20000)
+    page.wait_for_timeout(2000)
+
+
+def _parse_table(page) -> tuple[list[str], list[list[str]]]:
+    """Return (headers, data_rows) from the rendered HTML table."""
     try:
-        from curl_cffi import requests as cffi_requests
-        s = cffi_requests.Session(impersonate="chrome124")
-        s.headers.update(BROWSER_HEADERS)
-        try:
-            s.get(IEX_BASE, timeout=15)
-            time.sleep(1)
-        except Exception:
-            pass
-        return s
-    except ImportError:
-        pass
+        header_cells = page.locator("table thead th").all()
+        if not header_cells:
+            header_cells = page.locator("table tr:first-child th, table tr:first-child td").all()
+        headers = [th.inner_text().strip() for th in header_cells]
 
-    s = requests.Session()
-    s.headers.update(BROWSER_HEADERS)
-    try:
-        s.get(IEX_BASE, timeout=15)
-        time.sleep(1)
-    except Exception:
-        pass
-    return s
+        body_rows = page.locator("table tbody tr").all()
+        data = []
+        for tr in body_rows:
+            cells = [td.inner_text().strip() for td in tr.locator("td").all()]
+            if cells:
+                data.append(cells)
+        return headers, data
+    except Exception as e:
+        print(f"[DAM] Table parse error: {e}")
+        return [], []
 
 
-def _try_endpoint(session: requests.Session, url: str, payload: dict) -> dict | None:
-    try:
-        r = session.post(url, json=payload, timeout=20)
-        if r.status_code == 200:
-            data = r.json()
-            if "d" in data:
-                inner = data["d"]
-                if isinstance(inner, str):
-                    return json.loads(inner)
-                return inner
-            return data
-    except Exception:
-        pass
-    try:
-        r = session.get(url, params=payload, timeout=20)
-        if r.status_code == 200:
-            data = r.json()
-            if "d" in data:
-                inner = data["d"]
-                if isinstance(inner, str):
-                    return json.loads(inner)
-                return inner
-            return data
-    except Exception:
-        pass
+def _mcp_col_index(headers: list[str]) -> int | None:
+    for i, h in enumerate(headers):
+        if "MCP" in h.upper():
+            return i
     return None
 
 
-# ── API approach ──────────────────────────────────────────────────────────────
-
-def _fetch_dam_api(target_date: date) -> float | None:
-    session = _make_session()
-    date_variants = [
-        _iex_date_param(target_date),
-        target_date.strftime("%d/%m/%Y"),
-        target_date.strftime("%Y-%m-%d"),
-    ]
-    for date_str in date_variants:
-        payload = {"date": date_str, "Date": date_str}
-        for endpoint in IEX_DAM_ENDPOINTS:
-            result = _try_endpoint(session, endpoint, payload)
-            if result is None:
-                continue
-            print(f"[DAM] Got response from {endpoint}")
-            if isinstance(result, dict):
-                for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP", "MCP", "AvgPrice"):
-                    if key in result and result[key]:
-                        try:
-                            return round(float(result[key]), 2)
-                        except Exception:
-                            pass
-                data = result.get("Data") or result.get("data") or []
-                if isinstance(data, list) and len(data) >= 20:
-                    prices = [float(r.get("MCP") or r.get("Price") or 0) for r in data]
-                    valid = [p for p in prices if p > 0]
-                    if valid:
-                        return round(mean(valid), 2)
-            elif isinstance(result, list) and len(result) >= 20:
-                prices = [float(r.get("MCP") or r.get("Price") or 0) for r in result]
-                valid = [p for p in prices if p > 0]
-                if valid:
-                    return round(mean(valid), 2)
-    return None
+def _parse_float(s: str) -> float | None:
+    try:
+        v = float(s.replace(",", "").strip())
+        return v if v > 0 else None
+    except Exception:
+        return None
 
 
-# ── Playwright fallback ───────────────────────────────────────────────────────
+# ── Fetch function ────────────────────────────────────────────────────────────
 
-def _fetch_dam_via_playwright(target_date: date) -> float | None:
+def fetch_dam_daily(period: str) -> float | None:
+    """Return daily avg DAM MCP in Rs/Unit (MCP Rs/MWh ÷ 1000)."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("[DAM] Playwright not installed.")
         return None
 
-    date_str = _iex_date_param(target_date)
-    url = f"{IEX_BASE}/market-data/day-ahead-market/market-snapshot"
-    captured = {"price": None}
-
-    def handle_response(response):
-        ct = response.headers.get("content-type", "")
-        if "json" in ct and captured["price"] is None:
-            try:
-                body = response.json()
-                if "d" in body:
-                    inner = body["d"]
-                    if isinstance(inner, str):
-                        inner = json.loads(inner)
-                    body = inner
-                if isinstance(body, dict):
-                    data = body.get("Data") or body.get("data") or []
-                    if isinstance(data, list) and len(data) >= 20:
-                        prices = [float(r.get("MCP") or r.get("Price") or 0) for r in data]
-                        valid = [p for p in prices if p > 0]
-                        if valid:
-                            captured["price"] = round(mean(valid), 2)
-                    for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP"):
-                        if key in body and body[key]:
-                            captured["price"] = round(float(body[key]), 2)
-            except Exception:
-                pass
-
+    print(f"[DAM] Fetching Daily tab, period='{period}'...")
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
-        )
-        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
+        browser, context = _make_browser_context(pw)
         page = context.new_page()
-        page.on("response", handle_response)
-        page.goto(url, wait_until="domcontentloaded", timeout=90000)
-        page.wait_for_timeout(8000)
-
-        # Try internal API fetch from within the page
-        if captured["price"] is None:
-            for endpoint in IEX_DAM_ENDPOINTS:
-                try:
-                    result = page.evaluate(f"""
-                        async () => {{
-                            try {{
-                                const r = await fetch('{endpoint}', {{
-                                    method: 'POST',
-                                    headers: {{'Content-Type': 'application/json; charset=utf-8',
-                                               'X-Requested-With': 'XMLHttpRequest'}},
-                                    body: JSON.stringify({{date: '{date_str}'}})
-                                }});
-                                return await r.json();
-                            }} catch(e) {{ return null; }}
-                        }}
-                    """)
-                    if result:
-                        inner = result.get("d", result)
-                        if isinstance(inner, str):
-                            inner = json.loads(inner)
-                        if isinstance(inner, dict):
-                            data = inner.get("Data") or inner.get("data") or []
-                            if isinstance(data, list) and len(data) >= 20:
-                                prices = [float(r.get("MCP") or r.get("Price") or 0) for r in data]
-                                valid = [p for p in prices if p > 0]
-                                if valid:
-                                    captured["price"] = round(mean(valid), 2)
-                                    break
-                except Exception:
-                    pass
-
-        # DOM text fallback
-        if captured["price"] is None:
-            text = page.inner_text("body")
-            for pat in [
-                r"Weighted\s+Avg(?:erage)?\s+MCP[:\s]+(\d+\.?\d*)",
-                r"WAMCP[:\s]+(\d+\.?\d*)",
-                r"Avg(?:erage)?\s+(?:DAM\s+)?(?:Price|MCP)[:\s]+(\d+\.?\d*)",
-            ]:
-                m = re.search(pat, text, re.IGNORECASE)
-                if m:
-                    captured["price"] = round(float(m.group(1)), 2)
-                    break
-
-        browser.close()
-
-    return captured["price"]
+        try:
+            page.goto(IEX_DAM_URL, wait_until="domcontentloaded", timeout=90000)
+            _select_interval_and_period(page, "Daily", period)
+            headers, data = _parse_table(page)
+            print(f"[DAM] Daily: headers={headers}, rows={len(data)}")
+            mcp_col = _mcp_col_index(headers)
+            if mcp_col is None:
+                print("[DAM] ERROR: MCP column not found in Daily table.")
+                return None
+            mcps = []
+            for row in data:
+                if mcp_col < len(row):
+                    v = _parse_float(row[mcp_col])
+                    if v is not None:
+                        mcps.append(v)
+            if not mcps:
+                print("[DAM] No valid MCP values in Daily table.")
+                return None
+            avg = round(mean(mcps) / 1000, 4)
+            print(f"[DAM] Daily avg MCP: {avg} Rs/Unit (n={len(mcps)})")
+            return avg
+        except Exception as e:
+            print(f"[DAM] Daily fetch exception: {e}")
+        finally:
+            browser.close()
+    return None
 
 
-# ── Main logic ────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-def scrape_dam(target_date: date | None = None) -> bool:
-    if target_date is None:
-        target_date = date.today() - timedelta(days=1)
-
+def scrape_dam(target_date: date, period_label: str) -> bool:
+    """
+    period_label: "Yesterday" → append (skip if already present)
+                  "Today"     → upsert (overwrite today's row each hour)
+    """
     csv_path = CSV_PATHS["dam"]
-    last = _last_date_in_csv(csv_path)
-    if last and last >= target_date:
-        print(f"[DAM] Data for {target_date} already present. Skipping.")
-        return True
+    rows = _read_csv(csv_path)
 
-    print(f"[DAM] Fetching data for {target_date}...")
+    if period_label.lower() == "yesterday":
+        last = _last_data_date(rows)
+        if last and last >= target_date:
+            print(f"[DAM] Data for {target_date} already present. Skipping.")
+            return True
 
-    dam_price = _fetch_dam_api(target_date)
+    print(f"[DAM] Scraping period='{period_label}' for date={target_date}...")
+
+    dam_price = fetch_dam_daily(period_label)
 
     if dam_price is None:
-        print("[DAM] API failed; trying Playwright stealth mode...")
-        dam_price = _fetch_dam_via_playwright(target_date)
-
-    if dam_price is None:
-        print(f"[DAM] ERROR: Could not fetch DAM price for {target_date}.")
+        print(f"[DAM] ERROR: Could not get daily MCP for {target_date}.")
         return False
 
-    row = [_format_date(target_date), dam_price, "", ""]
-    print(f"[DAM] Writing: {row}")
+    new_row = [_format_date(target_date), dam_price, "", ""]
+    print(f"[DAM] Row to write: {new_row}")
 
-    with open(csv_path, "a", newline="") as f:
-        csv.writer(f).writerow(row)
+    if period_label.lower() == "today":
+        rows = _upsert_row(rows, target_date, new_row)
+        _write_csv(csv_path, rows)
+    else:
+        with open(csv_path, "a", newline="") as f:
+            csv.writer(f).writerow(new_row)
 
-    print(f"[DAM] Done for {target_date}.")
+    print(f"[DAM] Done ({period_label}).")
     return True
 
 
 if __name__ == "__main__":
-    success = scrape_dam()
+    parser = argparse.ArgumentParser(description="Scrape IEX DAM prices")
+    parser.add_argument(
+        "--period",
+        choices=["yesterday", "today"],
+        default="yesterday",
+        help="Delivery period: 'yesterday' (nightly, default) or 'today' (hourly live)",
+    )
+    args = parser.parse_args()
+
+    if args.period == "yesterday":
+        target  = date.today() - timedelta(days=1)
+        p_label = "Yesterday"
+    else:
+        target  = date.today()
+        p_label = "Today"
+
+    success = scrape_dam(target, p_label)
     sys.exit(0 if success else 1)

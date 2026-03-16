@@ -1,76 +1,62 @@
 """
-Scrape IEX Real-Time Market (RTM) data and append to RTM Prices.csv.
+Scrape IEX Real-Time Market (RTM) data via Playwright UI simulation.
 
-Columns written: Date, RTM price, Solar_Avg, NonSolar_Avg
-  - RTM price   : daily weighted average MCP (Rs/Unit)
-  - Solar_Avg   : average of 15-min block prices for 6am–6pm IST
-  - NonSolar_Avg: average of 15-min block prices for 6pm–6am IST
+Usage:
+  python scrape_iex_rtm.py                   # yesterday's finalized data (nightly cron)
+  python scrape_iex_rtm.py --period today    # today's live partial data (hourly cron)
+
+Columns written to RTM Prices.csv:
+  Date, RTM price (daily avg MCP Rs/Unit), Solar_Avg, NonSolar_Avg
 
 Strategy:
-  1. Try IEX internal API endpoints directly (used by their own website).
-  2. If blocked, fall back to Playwright with stealth headers.
+  - Navigate to IEX RTM page
+  - Click "Daily" interval tab → select delivery period → parse HTML table → daily MCP ÷ 1000
+  - Click "Hourly" interval tab → select delivery period → parse Hour + MCP columns
+    Solar avg  = hours 7–18  (6am–6pm IST)
+    NonSolar avg = hours 1–6 + 19–24 (6pm–6am IST)
+  - For "Today": only average hours with data (partial day OK)
+  - For "Yesterday": append row if not already present
+  - For "Today": upsert (overwrite today's row if exists, else append)
 """
 
+import argparse
 import csv
-import json
-import re
 import sys
-import time
 from datetime import date, timedelta
 from pathlib import Path
 from statistics import mean
 
-import requests
-
 sys.path.insert(0, str(Path(__file__).parent))
-from config import (
-    CSV_PATHS,
-    RTM_SOLAR_BLOCKS,
-    RTM_NONSOLAR_BLOCKS,
-)
+from config import CSV_PATHS
 
-# IEX India internal API endpoints (used by their website frontend)
-IEX_BASE = "https://www.iexindia.com"
+IEX_RTM_URL = "https://www.iexindia.com/market-data/real-time-market/market-snapshot"
 
-# These are the actual XHR endpoints the IEX website frontend calls
-IEX_RTM_ENDPOINTS = [
-    f"{IEX_BASE}/Modules/MarketData/RTM/frmRTMMarketSnapshot.aspx/GetRTMMarketSummary",
-    f"{IEX_BASE}/api/MarketData/RTM/GetRTMMarketSummary",
-    f"{IEX_BASE}/api/rtm/summary",
-    f"{IEX_BASE}/MarketData/RTM/GetMarketSummary",
-]
-
-IEX_RTM_BLOCK_ENDPOINTS = [
-    f"{IEX_BASE}/Modules/MarketData/RTM/frmRTMMarketSnapshot.aspx/GetRTMBlockPrices",
-    f"{IEX_BASE}/api/MarketData/RTM/GetRTMBlockPrices",
-    f"{IEX_BASE}/api/rtm/blockprices",
-]
-
-# Simulate a real browser session
-BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "X-Requested-With": "XMLHttpRequest",
-    "Referer": f"{IEX_BASE}/market-data/real-time-market/market-snapshot",
-    "Origin": IEX_BASE,
-    "Connection": "keep-alive",
-}
+# IEX "Hourly" tab: Hour column is 1-indexed (Hour 1 = 00:00–01:00 IST)
+SOLAR_HOURS    = set(range(7, 19))           # Hour 7–18 → 06:00–18:00 IST
+NONSOLAR_HOURS = set(range(1, 7)) | set(range(19, 25))  # 1–6 + 19–24
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── CSV helpers ───────────────────────────────────────────────────────────────
 
-def _last_date_in_csv(path: str) -> date | None:
+def _read_csv(path: str) -> list[list[str]]:
     p = Path(path)
     if not p.exists():
-        return None
+        return []
     with open(p, newline="") as f:
-        rows = list(csv.reader(f))
-    data_rows = [r for r in rows if r and not r[0].startswith("Date")]
+        return list(csv.reader(f))
+
+
+def _write_csv(path: str, rows: list[list[str]]) -> None:
+    with open(path, "w", newline="") as f:
+        csv.writer(f).writerows(rows)
+
+
+def _format_date(d: date) -> str:
+    return d.strftime("%d/%m/%y")
+
+
+def _last_data_date(rows: list[list[str]]) -> date | None:
+    data_rows = [r for r in rows if r and not r[0].strip().lower().startswith("date")]
     if not data_rows:
         return None
     last = data_rows[-1][0].strip()
@@ -84,167 +70,152 @@ def _last_date_in_csv(path: str) -> date | None:
         return None
 
 
-def _format_date(d: date) -> str:
-    return d.strftime("%d/%m/%y")
+def _upsert_row(rows: list[list[str]], target_date: date, new_row: list) -> list[list[str]]:
+    """Replace existing row for target_date, or append if not found."""
+    target_str = _format_date(target_date)
+    for i, row in enumerate(rows):
+        if row and row[0].strip() == target_str:
+            rows[i] = new_row
+            print(f"[RTM] Updated existing row for {target_str}")
+            return rows
+    rows.append(new_row)
+    print(f"[RTM] Appended new row for {target_str}")
+    return rows
 
 
-def _iex_date_param(d: date) -> str:
-    """IEX uses DD-MMM-YYYY format, e.g. 15-Mar-2026"""
-    return d.strftime("%d-%b-%Y")
+# ── Playwright helpers ────────────────────────────────────────────────────────
+
+def _make_browser_context(pw):
+    browser = pw.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+        ],
+    )
+    context = browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1280, "height": 800},
+        locale="en-IN",
+    )
+    context.add_init_script(
+        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+    )
+    return browser, context
 
 
-def _iex_date_param_slash(d: date) -> str:
-    """Alternative format DD/MM/YYYY"""
-    return d.strftime("%d/%m/%Y")
+def _select_interval_and_period(page, interval: str, period: str) -> None:
+    """Click an interval tab (e.g. 'Daily', 'Hourly') then pick a delivery period."""
+    tab_selector = (
+        f"button:has-text('{interval}'), "
+        f"[role='tab']:has-text('{interval}')"
+    )
+    page.wait_for_selector(tab_selector, timeout=30000)
+    page.locator(tab_selector).first.click()
+    page.wait_for_timeout(1500)
+
+    # Material-UI Select — click the combobox, then pick the matching option
+    combo = page.locator("[role='combobox']").first
+    combo.click()
+    page.wait_for_timeout(500)
+    page.locator(f"[role='option']:has-text('{period}')").first.click()
+
+    page.wait_for_load_state("networkidle", timeout=20000)
+    page.wait_for_timeout(2000)
 
 
-def _make_session():
-    """
-    Create a session using curl_cffi (Chrome TLS fingerprint) if available,
-    otherwise fall back to requests. curl_cffi bypasses bot detection.
-    """
+def _parse_table(page) -> tuple[list[str], list[list[str]]]:
+    """Return (headers, data_rows) from the rendered HTML table."""
     try:
-        from curl_cffi import requests as cffi_requests
-        s = cffi_requests.Session(impersonate="chrome124")
-        s.headers.update(BROWSER_HEADERS)
-        try:
-            s.get(IEX_BASE, timeout=15)
-            time.sleep(1)
-        except Exception:
-            pass
-        return s
-    except ImportError:
-        pass
+        header_cells = page.locator("table thead th").all()
+        if not header_cells:
+            header_cells = page.locator("table tr:first-child th, table tr:first-child td").all()
+        headers = [th.inner_text().strip() for th in header_cells]
 
-    s = requests.Session()
-    s.headers.update(BROWSER_HEADERS)
-    try:
-        s.get(IEX_BASE, timeout=15)
-        time.sleep(1)
-    except Exception:
-        pass
-    return s
+        body_rows = page.locator("table tbody tr").all()
+        data = []
+        for tr in body_rows:
+            cells = [td.inner_text().strip() for td in tr.locator("td").all()]
+            if cells:
+                data.append(cells)
+        return headers, data
+    except Exception as e:
+        print(f"[RTM] Table parse error: {e}")
+        return [], []
 
 
-# ── API approach ──────────────────────────────────────────────────────────────
-
-def _try_endpoint(session: requests.Session, url: str, payload: dict) -> dict | None:
-    """POST to an endpoint with JSON payload, return parsed JSON or None."""
-    try:
-        r = session.post(url, json=payload, timeout=20)
-        if r.status_code == 200:
-            data = r.json()
-            # IEX ASP.NET endpoints wrap response in {"d": ...}
-            if "d" in data:
-                inner = data["d"]
-                if isinstance(inner, str):
-                    return json.loads(inner)
-                return inner
-            return data
-    except Exception:
-        pass
-
-    # Also try GET
-    try:
-        params = {k: v for k, v in payload.items()}
-        r = session.get(url, params=params, timeout=20)
-        if r.status_code == 200:
-            data = r.json()
-            if "d" in data:
-                inner = data["d"]
-                if isinstance(inner, str):
-                    return json.loads(inner)
-                return inner
-            return data
-    except Exception:
-        pass
-
+def _mcp_col_index(headers: list[str]) -> int | None:
+    for i, h in enumerate(headers):
+        if "MCP" in h.upper():
+            return i
     return None
 
 
-def _fetch_rtm_api(target_date: date) -> tuple[float | None, list[float] | None]:
-    """Try all known IEX API endpoints to get daily MCP and block prices."""
-    session = _make_session()
-
-    date_variants = [
-        _iex_date_param(target_date),
-        _iex_date_param_slash(target_date),
-        target_date.strftime("%Y-%m-%d"),
-    ]
-
-    daily_avg = None
-    blocks = None
-
-    for date_str in date_variants:
-        payload = {"date": date_str, "Date": date_str}
-
-        # Try daily summary endpoints
-        for endpoint in IEX_RTM_ENDPOINTS:
-            result = _try_endpoint(session, endpoint, payload)
-            if result is None:
-                continue
-            print(f"[RTM] Got response from {endpoint}")
-
-            # Extract daily weighted avg MCP
-            if isinstance(result, dict):
-                for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP", "MCP",
-                            "wamcp", "avgMCP", "AvgPrice", "avgPrice"):
-                    if key in result and result[key]:
-                        try:
-                            daily_avg = round(float(result[key]), 2)
-                            break
-                        except Exception:
-                            pass
-                # Also check nested Data
-                data = result.get("Data") or result.get("data") or []
-                if isinstance(data, list) and len(data) >= 90:
-                    prices = [float(row.get("MCP") or row.get("Price") or 0) for row in data]
-                    valid = [p for p in prices if p > 0]
-                    if valid:
-                        blocks = prices
-                        if daily_avg is None:
-                            daily_avg = round(mean(valid), 2)
-
-            elif isinstance(result, list) and len(result) >= 90:
-                prices = [float(r.get("MCP") or r.get("Price") or 0) for r in result]
-                valid = [p for p in prices if p > 0]
-                if valid:
-                    blocks = prices
-                    if daily_avg is None:
-                        daily_avg = round(mean(valid), 2)
-
-            if daily_avg is not None:
-                break
-        if daily_avg is not None:
-            break
-
-    # Try block price endpoints separately if no blocks yet
-    if blocks is None:
-        for date_str in date_variants:
-            payload = {"date": date_str, "Date": date_str}
-            for endpoint in IEX_RTM_BLOCK_ENDPOINTS:
-                result = _try_endpoint(session, endpoint, payload)
-                if result is None:
-                    continue
-                data = result if isinstance(result, list) else (
-                    result.get("Data") or result.get("data") or [])
-                if isinstance(data, list) and len(data) >= 90:
-                    prices = [float(r.get("MCP") or r.get("Price") or 0) for r in data]
-                    if [p for p in prices if p > 0]:
-                        blocks = prices
-                        break
-            if blocks:
-                break
-
-    return daily_avg, blocks
+def _hour_col_index(headers: list[str]) -> int | None:
+    for i, h in enumerate(headers):
+        if h.strip().lower() == "hour":
+            return i
+    return None
 
 
-# ── Playwright fallback (stealth mode) ───────────────────────────────────────
+def _parse_float(s: str) -> float | None:
+    try:
+        v = float(s.replace(",", "").strip())
+        return v if v > 0 else None
+    except Exception:
+        return None
 
-def _fetch_rtm_via_playwright(target_date: date) -> tuple[float | None, list[float] | None]:
+
+# ── Fetch functions ───────────────────────────────────────────────────────────
+
+def fetch_daily_mcp(period: str) -> float | None:
+    """Return daily avg MCP in Rs/Unit (MCP Rs/MWh ÷ 1000)."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[RTM] Playwright not installed.")
+        return None
+
+    print(f"[RTM] Fetching Daily tab, period='{period}'...")
+    with sync_playwright() as pw:
+        browser, context = _make_browser_context(pw)
+        page = context.new_page()
+        try:
+            page.goto(IEX_RTM_URL, wait_until="domcontentloaded", timeout=90000)
+            _select_interval_and_period(page, "Daily", period)
+            headers, data = _parse_table(page)
+            print(f"[RTM] Daily: headers={headers}, rows={len(data)}")
+            mcp_col = _mcp_col_index(headers)
+            if mcp_col is None:
+                print("[RTM] ERROR: MCP column not found in Daily table.")
+                return None
+            mcps = []
+            for row in data:
+                if mcp_col < len(row):
+                    v = _parse_float(row[mcp_col])
+                    if v is not None:
+                        mcps.append(v)
+            if not mcps:
+                print("[RTM] No valid MCP values in Daily table.")
+                return None
+            avg = round(mean(mcps) / 1000, 4)
+            print(f"[RTM] Daily avg MCP: {avg} Rs/Unit (n={len(mcps)})")
+            return avg
+        except Exception as e:
+            print(f"[RTM] Daily fetch exception: {e}")
+        finally:
+            browser.close()
+    return None
+
+
+def fetch_hourly_solar_nonsolar(period: str) -> tuple[float | None, float | None]:
     """
-    Use Playwright with stealth headers to scrape IEX RTM page.
-    Injects JavaScript to call the internal API from inside the browser context.
+    Fetch Hourly tab data and return (solar_avg, nonsolar_avg) in Rs/Unit.
+    For 'Today', only includes hours that have data (MCP > 0).
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -252,167 +223,116 @@ def _fetch_rtm_via_playwright(target_date: date) -> tuple[float | None, list[flo
         print("[RTM] Playwright not installed.")
         return None, None
 
-    date_str = _iex_date_param(target_date)
-    url = f"{IEX_BASE}/market-data/real-time-market/market-snapshot"
-
+    print(f"[RTM] Fetching Hourly tab, period='{period}'...")
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
-        )
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9",
-            }
-        )
-        # Remove automation markers
-        context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        """)
-
+        browser, context = _make_browser_context(pw)
         page = context.new_page()
-        captured_data = {"daily": None, "blocks": None}
+        try:
+            page.goto(IEX_RTM_URL, wait_until="domcontentloaded", timeout=90000)
+            _select_interval_and_period(page, "Hourly", period)
+            headers, data = _parse_table(page)
+            print(f"[RTM] Hourly: headers={headers}, rows={len(data)}")
+            hour_col = _hour_col_index(headers)
+            mcp_col  = _mcp_col_index(headers)
+            if hour_col is None or mcp_col is None:
+                print(f"[RTM] ERROR: Hour col={hour_col}, MCP col={mcp_col}")
+                return None, None
 
-        def handle_response(response):
-            ct = response.headers.get("content-type", "")
-            if "json" in ct:
+            solar_mcps    = []
+            nonsolar_mcps = []
+            for row in data:
+                if max(hour_col, mcp_col) >= len(row):
+                    continue
                 try:
-                    body = response.json()
-                    # Look for block data
-                    if "d" in body:
-                        inner = body["d"]
-                        if isinstance(inner, str):
-                            try:
-                                inner = json.loads(inner)
-                            except Exception:
-                                pass
-                        body = inner
-                    if isinstance(body, dict):
-                        data = body.get("Data") or body.get("data") or []
-                        if isinstance(data, list) and len(data) >= 90:
-                            prices = [float(r.get("MCP") or r.get("Price") or 0) for r in data]
-                            valid = [p for p in prices if p > 0]
-                            if valid:
-                                captured_data["blocks"] = prices
-                                captured_data["daily"] = round(mean(valid), 2)
-                        for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP"):
-                            if key in body and body[key]:
-                                captured_data["daily"] = round(float(body[key]), 2)
+                    hour = int(row[hour_col].strip())
                 except Exception:
-                    pass
+                    continue
+                mcp = _parse_float(row[mcp_col])
+                if mcp is None:
+                    continue
+                mcp_unit = mcp / 1000
+                if hour in SOLAR_HOURS:
+                    solar_mcps.append(mcp_unit)
+                elif hour in NONSOLAR_HOURS:
+                    nonsolar_mcps.append(mcp_unit)
 
-        page.on("response", handle_response)
-        page.goto(url, wait_until="domcontentloaded", timeout=90000)
-        page.wait_for_timeout(8000)
-
-        # Try to call internal API using fetch from within the page context
-        for endpoint in IEX_RTM_ENDPOINTS + IEX_RTM_BLOCK_ENDPOINTS:
-            if captured_data["daily"] is not None and captured_data["blocks"] is not None:
-                break
-            try:
-                result = page.evaluate(f"""
-                    async () => {{
-                        try {{
-                            const r = await fetch('{endpoint}', {{
-                                method: 'POST',
-                                headers: {{'Content-Type': 'application/json; charset=utf-8',
-                                           'X-Requested-With': 'XMLHttpRequest'}},
-                                body: JSON.stringify({{date: '{date_str}'}})
-                            }});
-                            return await r.json();
-                        }} catch(e) {{ return null; }}
-                    }}
-                """)
-                if result:
-                    # Parse result
-                    inner = result.get("d", result)
-                    if isinstance(inner, str):
-                        try:
-                            inner = json.loads(inner)
-                        except Exception:
-                            pass
-                    if isinstance(inner, dict):
-                        data = inner.get("Data") or inner.get("data") or []
-                        if isinstance(data, list) and len(data) >= 90:
-                            prices = [float(r.get("MCP") or r.get("Price") or 0) for r in data]
-                            valid = [p for p in prices if p > 0]
-                            if valid:
-                                captured_data["blocks"] = prices
-                                captured_data["daily"] = round(mean(valid), 2)
-            except Exception:
-                pass
-
-        # DOM fallback: look for MCP values in the page text
-        if captured_data["daily"] is None:
-            text = page.inner_text("body")
-            for pat in [
-                r"Weighted\s+Avg(?:erage)?\s+MCP[:\s]+(\d+\.?\d*)",
-                r"WAMCP[:\s]+(\d+\.?\d*)",
-                r"Avg(?:erage)?\s+(?:Price|MCP)[:\s]+(\d+\.?\d*)",
-            ]:
-                m = re.search(pat, text, re.IGNORECASE)
-                if m:
-                    captured_data["daily"] = round(float(m.group(1)), 2)
-                    break
-
-        browser.close()
-
-    return captured_data["daily"], captured_data["blocks"]
+            solar_avg    = round(mean(solar_mcps),    4) if solar_mcps    else None
+            nonsolar_avg = round(mean(nonsolar_mcps), 4) if nonsolar_mcps else None
+            print(
+                f"[RTM] Solar avg={solar_avg} ({len(solar_mcps)} hrs), "
+                f"NonSolar avg={nonsolar_avg} ({len(nonsolar_mcps)} hrs)"
+            )
+            return solar_avg, nonsolar_avg
+        except Exception as e:
+            print(f"[RTM] Hourly fetch exception: {e}")
+        finally:
+            browser.close()
+    return None, None
 
 
-# ── Main logic ────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-def scrape_rtm(target_date: date | None = None) -> bool:
-    if target_date is None:
-        target_date = date.today() - timedelta(days=1)
-
+def scrape_rtm(target_date: date, period_label: str) -> bool:
+    """
+    period_label: "Yesterday" → append (skip if already present)
+                  "Today"     → upsert (overwrite today's row each hour)
+    """
     csv_path = CSV_PATHS["rtm"]
+    rows = _read_csv(csv_path)
 
-    last = _last_date_in_csv(csv_path)
-    if last and last >= target_date:
-        print(f"[RTM] Data for {target_date} already present. Skipping.")
-        return True
+    if period_label.lower() == "yesterday":
+        last = _last_data_date(rows)
+        if last and last >= target_date:
+            print(f"[RTM] Data for {target_date} already present. Skipping.")
+            return True
 
-    print(f"[RTM] Fetching data for {target_date}...")
+    print(f"[RTM] Scraping period='{period_label}' for date={target_date}...")
 
-    daily_avg, blocks = _fetch_rtm_api(target_date)
-
-    if daily_avg is None or blocks is None:
-        print("[RTM] API incomplete; trying Playwright stealth mode...")
-        pw_avg, pw_blocks = _fetch_rtm_via_playwright(target_date)
-        if daily_avg is None:
-            daily_avg = pw_avg
-        if blocks is None:
-            blocks = pw_blocks
+    daily_avg = fetch_daily_mcp(period_label)
+    solar_avg, nonsolar_avg = fetch_hourly_solar_nonsolar(period_label)
 
     if daily_avg is None:
-        print(f"[RTM] ERROR: Could not fetch daily avg for {target_date}.")
+        print(f"[RTM] ERROR: Could not get daily MCP for {target_date}.")
         return False
 
-    if blocks and len(blocks) >= 96:
-        solar_prices    = [blocks[i - 1] for i in RTM_SOLAR_BLOCKS    if blocks[i - 1] > 0]
-        nonsolar_prices = [blocks[i - 1] for i in RTM_NONSOLAR_BLOCKS if blocks[i - 1] > 0]
-        solar_avg    = round(mean(solar_prices),    2) if solar_prices    else daily_avg
-        nonsolar_avg = round(mean(nonsolar_prices), 2) if nonsolar_prices else daily_avg
-    else:
-        print("[RTM] WARNING: Block data unavailable; solar/non-solar avg set to daily avg.")
-        solar_avg    = daily_avg
+    # Fall back to daily_avg when hourly is unavailable
+    if solar_avg is None:
+        print("[RTM] WARNING: Solar avg unavailable; using daily avg as fallback.")
+        solar_avg = daily_avg
+    if nonsolar_avg is None:
+        print("[RTM] WARNING: NonSolar avg unavailable; using daily avg as fallback.")
         nonsolar_avg = daily_avg
 
-    row = [_format_date(target_date), daily_avg, solar_avg, nonsolar_avg]
-    print(f"[RTM] Writing: {row}")
+    new_row = [_format_date(target_date), daily_avg, solar_avg, nonsolar_avg]
+    print(f"[RTM] Row to write: {new_row}")
 
-    with open(csv_path, "a", newline="") as f:
-        csv.writer(f).writerow(row)
+    if period_label.lower() == "today":
+        rows = _upsert_row(rows, target_date, new_row)
+        _write_csv(csv_path, rows)
+    else:
+        with open(csv_path, "a", newline="") as f:
+            csv.writer(f).writerow(new_row)
 
-    print(f"[RTM] Done for {target_date}.")
+    print(f"[RTM] Done ({period_label}).")
     return True
 
 
 if __name__ == "__main__":
-    success = scrape_rtm()
+    parser = argparse.ArgumentParser(description="Scrape IEX RTM prices")
+    parser.add_argument(
+        "--period",
+        choices=["yesterday", "today"],
+        default="yesterday",
+        help="Delivery period: 'yesterday' (nightly, default) or 'today' (hourly live)",
+    )
+    args = parser.parse_args()
+
+    if args.period == "yesterday":
+        target   = date.today() - timedelta(days=1)
+        p_label  = "Yesterday"
+    else:
+        target   = date.today()
+        p_label  = "Today"
+
+    success = scrape_rtm(target, p_label)
     sys.exit(0 if success else 1)
