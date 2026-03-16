@@ -668,13 +668,34 @@ def _scrape_hourly_chunk_paginated(
                 print(f"[{label}] Downloaded: {tmp_path} ({download.suggested_filename})")
 
                 import pandas as pd  # lazy import — not needed by generate_backfill_matrix.py
-                if suffix in (".xlsx", ".xls"):
-                    df = pd.read_excel(tmp_path, header=0, dtype=str)
-                else:
-                    df = pd.read_csv(tmp_path, header=0, dtype=str)
 
-                headers_dl = [str(c).strip() for c in df.columns]
-                print(f"[{label}] Download columns: {headers_dl}")
+                # IEX Excel exports have title/disclaimer rows before the actual data
+                # headers. Read without assuming row 0 is the header, then find the
+                # row that contains "Date" and "Hour" to use as the real header.
+                if suffix in (".xlsx", ".xls"):
+                    raw = pd.read_excel(tmp_path, header=None, dtype=str)
+                else:
+                    raw = pd.read_csv(tmp_path, header=None, dtype=str)
+
+                header_row = None
+                for i, row in raw.iterrows():
+                    vals = [str(v).strip().lower() for v in row]
+                    if "date" in vals and "hour" in vals:
+                        header_row = i
+                        break
+
+                if header_row is None:
+                    print(f"[{label}] Cannot find header row in download; raw rows 0-4:")
+                    for i in range(min(5, len(raw))):
+                        print(f"  row {i}: {list(raw.iloc[i])}")
+                    raise ValueError("header row not found in downloaded file")
+
+                df = raw.iloc[header_row + 1:].copy()
+                df.columns = [str(c).strip() for c in raw.iloc[header_row]]
+                df = df.reset_index(drop=True)
+
+                headers_dl = list(df.columns)
+                print(f"[{label}] Download columns (row {header_row}): {headers_dl}")
 
                 date_col_dl = next(
                     (h for h in headers_dl if "date" in h.lower()), None
