@@ -280,46 +280,63 @@ def _set_custom_date_range(page, start: date, end: date, label: str) -> bool:
     start_str = _format_date_iex(start)  # DD-MM-YYYY
     end_str   = _format_date_iex(end)
 
-    # Step 2: fill date inputs — try several selector strategies
+    # Step 2: fill date inputs.
+    # MUI Select renders a hidden <input aria-hidden='true'> inside each combobox.
+    # Filtering those out leaves only the visible date picker inputs.
     filled_start = False
     filled_end   = False
 
     date_input_selectors = [
-        "input[type='date']",
+        # Best: excludes MUI Select's hidden inputs → only real date fields remain
+        "input:not([aria-hidden='true']):not([type='hidden'])",
+        # Broader fallbacks
         "input[placeholder*='Date'], input[placeholder*='date']",
         "input[placeholder*='From'], input[placeholder*='from']",
-        ".MuiInputBase-input",
+        "input[type='date']",
         "input[type='text']",
     ]
 
     for sel in date_input_selectors:
         try:
-            inputs = page.locator(sel).all()
+            all_inputs = page.locator(sel).all()
+            # Filter to visible, enabled inputs only (skips disabled/hidden elements)
+            inputs = [inp for inp in all_inputs if inp.is_visible() and inp.is_enabled()]
             if len(inputs) >= 2:
-                # Clear and type start date
                 inputs[0].click()
                 inputs[0].triple_click()
                 inputs[0].fill(start_str)
                 page.wait_for_timeout(300)
-                # Clear and type end date
                 inputs[1].click()
                 inputs[1].triple_click()
                 inputs[1].fill(end_str)
                 page.wait_for_timeout(300)
-                filled_start = True
-                filled_end   = True
-                print(f"[{label}] Filled date range {start_str} → {end_str} via '{sel}'")
-                break
-        except Exception:
+                # Verify the fill worked (value should contain part of date)
+                val0 = inputs[0].input_value()
+                val1 = inputs[1].input_value()
+                if val0 and val1:
+                    filled_start = True
+                    filled_end   = True
+                    print(
+                        f"[{label}] Filled date range {start_str} → {end_str} "
+                        f"via '{sel}' (got '{val0}', '{val1}')"
+                    )
+                    break
+                print(f"[{label}] Selector '{sel}' found {len(inputs)} inputs but fill failed (val0='{val0}', val1='{val1}')")
+        except Exception as e:
+            print(f"[{label}] Selector '{sel}' error: {e}")
             continue
 
     if not filled_start or not filled_end:
         print(f"[{label}] WARNING: Could not fill date inputs; trying keyboard approach")
-        # Fallback: tab through inputs
         try:
-            page.keyboard.press("Tab")
+            # Click body to ensure focus, then tab to first date field
+            page.keyboard.press("Escape")
             page.wait_for_timeout(200)
-            page.keyboard.type(start_str)
+            # Find first visible non-hidden input and type into it
+            first_input = page.locator("input:not([aria-hidden='true'])").first
+            first_input.click()
+            first_input.triple_click()
+            first_input.type(start_str)
             page.keyboard.press("Tab")
             page.wait_for_timeout(200)
             page.keyboard.type(end_str)
@@ -537,147 +554,145 @@ def _scrape_hourly_chunk_paginated(
     url: str, start: date, end: date, label: str
 ) -> dict[date, tuple[float | None, float | None]]:
     """
-    Scrape hourly solar/nonsolar data for dates in [start, end].
+    Scrape hourly solar/nonsolar data for dates in [start, end] using UI interaction.
 
-    IEX DOES NOT support interval=HOURLY&dp=SELECT_RANGE — the table
-    renders empty regardless of fromDate/toDate params.
+    IEX does NOT serve HOURLY data via URL params (dp=SELECT_RANGE returns empty).
+    The working approach matches what a user does manually:
+      1. Navigate to the market snapshot page
+      2. Page loads with interval already set to HOURLY (via ?interval=HOURLY URL param)
+      3. Open delivery period dropdown → select '-Select Range-'
+      4. Fill From / To date inputs
+      5. Click 'Update Report'
+      6. Parse the resulting table (may be paginated — one day per page — or all
+         on one non-paginated table depending on IEX rendering)
 
-    The only working mode is LAST_31_DAYS (paginated, one day per page,
-    page 1 = oldest = 31 days ago, page 31 = today).  This means data
-    older than ~31 days cannot be retrieved from IEX at all.
-
-    Strategy:
-      1. If the chunk is entirely older than 31 days → return {} immediately.
-      2. Otherwise navigate to LAST_31_DAYS and page through up to 31 pages,
-         collecting rows for any date that falls in [start, end].
+    Rows are accumulated grouped by date to handle both rendering modes.
     """
     from playwright.sync_api import sync_playwright
 
     result: dict[date, tuple[float | None, float | None]] = {}
 
-    # IEX does not support HOURLY+SELECT_RANGE (empty table).
-    # Try two URLs in order:
-    #   1. LAST_31_DAYS with toDate hint — may serve a historical 31-day window
-    #      if IEX honours the toDate param for this dp value.
-    #   2. LAST_31_DAYS without toDate — always works but only shows current 31 days,
-    #      so only useful when the chunk overlaps with today-31…today.
-    to_str   = end.strftime("%d-%m-%Y")
-    today    = date.today()
-    cutoff   = today - timedelta(days=32)
+    # Load page with HOURLY interval pre-selected via URL param, then use UI
+    # to select the custom delivery period (dropdown → -Select Range- → fill dates).
+    base_url = f"{url}?interval=HOURLY&showGraph=false"
+    print(f"[{label}] Hourly UI chunk {start}→{end}")
 
-    candidate_urls = [
-        # attempt 1 — historical window via toDate
-        f"{url}?interval=HOURLY&dp=LAST_31_DAYS&toDate={to_str}&showGraph=false",
-    ]
-    if end >= cutoff:
-        # also try the plain current-window URL for recent chunks
-        candidate_urls.append(
-            f"{url}?interval=HOURLY&dp=LAST_31_DAYS&showGraph=false"
-        )
-
-    full_url = candidate_urls[0]   # start with historical attempt
-    print(f"[{label}] Hourly chunk {start}→{end}: trying {full_url}")
-
-    def _collect_from_url(url_to_try: str) -> dict[date, tuple[float | None, float | None]]:
-        """Open one browser, paginate the hourly table, return {date:(solar,nonsolar)}."""
-        collected: dict[date, tuple[float | None, float | None]] = {}
-        with sync_playwright() as pw:
-            browser, context = _make_browser_context(pw)
-            page = context.new_page()
+    with sync_playwright() as pw:
+        browser, context = _make_browser_context(pw)
+        page = context.new_page()
+        try:
+            # 1. Load page — HOURLY interval is pre-selected by URL param
+            page.goto(base_url, wait_until="domcontentloaded", timeout=90000)
             try:
-                page.goto(url_to_try, wait_until="domcontentloaded", timeout=90000)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=20000)
-                except Exception:
-                    pass
-                try:
-                    page.wait_for_selector("table tbody tr", timeout=20000)
-                except Exception:
-                    pass
-                page.wait_for_timeout(1500)
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception:
+                pass
+            page.wait_for_selector("[role='combobox']", timeout=30000)
+            page.wait_for_timeout(1500)
+            print(f"[{label}] Loaded: {page.title()}")
 
-                solar_by_date:    defaultdict[date, list[float]] = defaultdict(list)
-                nonsolar_by_date: defaultdict[date, list[float]] = defaultdict(list)
-                page_num = 0
-
-                while True:
-                    page_num += 1
-                    headers, data = _parse_main_table(page)
-
-                    date_col = _col_index(headers, "Date")
-                    hour_col = next(
-                        (i for i, h in enumerate(headers) if h.strip().lower() == "hour"),
-                        None,
-                    )
-                    mcp_col = _col_index(headers, "MCP")
-
-                    if date_col is None or hour_col is None or mcp_col is None:
-                        print(f"[{label}] Hourly page {page_num}: missing cols {headers}")
-                        break
-
-                    rows_this_page = 0
-                    for row in data:
-                        if max(date_col, hour_col, mcp_col) >= len(row):
-                            continue
-                        d_str = row[date_col].strip()
-                        if not d_str:
-                            continue
-                        d = _parse_iex_date(d_str)
-                        if d is None or not (start <= d <= end):
-                            continue
-                        try:
-                            hour = int(row[hour_col].strip())
-                        except Exception:
-                            continue
-                        mcp = _parse_float(row[mcp_col])
-                        if mcp is None:
-                            continue
-                        mcp_unit = mcp / 1000
-                        if hour in SOLAR_HOURS:
-                            solar_by_date[d].append(mcp_unit)
-                        elif hour in NONSOLAR_HOURS:
-                            nonsolar_by_date[d].append(mcp_unit)
-                        rows_this_page += 1
-
-                    dates_seen = sorted(set(solar_by_date) | set(nonsolar_by_date))
-                    print(
-                        f"[{label}] Hourly page {page_num}: {rows_this_page} rows, "
-                        f"{len(dates_seen)} dates in range so far "
-                        f"({dates_seen[0] if dates_seen else '?'} … "
-                        f"{dates_seen[-1] if dates_seen else '?'})"
-                    )
-
-                    if not _click_next_page(page, label):
-                        break
-
-                all_dates = set(solar_by_date) | set(nonsolar_by_date)
-                for d in all_dates:
-                    collected[d] = (
-                        round(mean(solar_by_date[d]),    4) if solar_by_date[d]    else None,
-                        round(mean(nonsolar_by_date[d]), 4) if nonsolar_by_date[d] else None,
-                    )
-
-            except Exception as e:
-                print(f"[{label}] _collect_from_url exception ({url_to_try}): {e}")
+            # 2. Select custom date range via the delivery period dropdown
+            ok = _set_custom_date_range(page, start, end, label)
+            if not ok:
+                print(f"[{label}] Could not set custom date range for {start}→{end}")
                 try:
                     page.screenshot(
-                        path=f"/tmp/iex_{label.lower()}_hourly_err_{start}.png",
+                        path=f"/tmp/iex_{label.lower()}_hourly_norange_{start}.png",
                         full_page=True,
                     )
                 except Exception:
                     pass
-            finally:
-                browser.close()
-        return collected
+                return {}
 
-    # Try each candidate URL; stop as soon as one returns in-range data
-    for attempt_url in candidate_urls:
-        print(f"[{label}] Hourly chunk {start}→{end}: trying {attempt_url}")
-        result = _collect_from_url(attempt_url)
-        if result:
-            print(f"[{label}] Got {len(result)} dates from {attempt_url}")
-            break
-        print(f"[{label}] No in-range data from {attempt_url} — trying next candidate")
+            # 3. Wait for the table to refresh with requested data
+            try:
+                page.wait_for_selector("table tbody tr", timeout=20000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+
+            # 4. Parse table — accumulate rows grouped by date
+            #    Works for both paginated (one day/page) and non-paginated (all rows)
+            solar_by_date:    defaultdict[date, list[float]] = defaultdict(list)
+            nonsolar_by_date: defaultdict[date, list[float]] = defaultdict(list)
+            page_num = 0
+
+            while True:
+                page_num += 1
+                headers, data = _parse_main_table(page)
+
+                date_col = _col_index(headers, "Date")
+                hour_col = next(
+                    (i for i, h in enumerate(headers) if h.strip().lower() == "hour"),
+                    None,
+                )
+                mcp_col = _col_index(headers, "MCP")
+
+                if date_col is None or hour_col is None or mcp_col is None:
+                    print(f"[{label}] Hourly page {page_num}: missing cols {headers}")
+                    if page_num == 1:
+                        try:
+                            page.screenshot(
+                                path=f"/tmp/iex_{label.lower()}_hourly_nocols_{start}.png",
+                                full_page=True,
+                            )
+                        except Exception:
+                            pass
+                    break
+
+                rows_this_page = 0
+                for row in data:
+                    if max(date_col, hour_col, mcp_col) >= len(row):
+                        continue
+                    d_str = row[date_col].strip()
+                    if not d_str:
+                        continue
+                    d = _parse_iex_date(d_str)
+                    if d is None or not (start <= d <= end):
+                        continue
+                    try:
+                        hour = int(row[hour_col].strip())
+                    except Exception:
+                        continue
+                    mcp = _parse_float(row[mcp_col])
+                    if mcp is None:
+                        continue
+                    mcp_unit = mcp / 1000
+                    if hour in SOLAR_HOURS:
+                        solar_by_date[d].append(mcp_unit)
+                    elif hour in NONSOLAR_HOURS:
+                        nonsolar_by_date[d].append(mcp_unit)
+                    rows_this_page += 1
+
+                dates_seen = sorted(set(solar_by_date) | set(nonsolar_by_date))
+                print(
+                    f"[{label}] Hourly page {page_num}: {rows_this_page} rows, "
+                    f"{len(dates_seen)} dates so far "
+                    f"({dates_seen[0] if dates_seen else '?'} … "
+                    f"{dates_seen[-1] if dates_seen else '?'})"
+                )
+
+                if not _click_next_page(page, label):
+                    break  # Last page or non-paginated table
+
+            # 5. Compute per-date averages from all accumulated MCPs
+            for d in set(solar_by_date) | set(nonsolar_by_date):
+                result[d] = (
+                    round(mean(solar_by_date[d]),    4) if solar_by_date[d]    else None,
+                    round(mean(nonsolar_by_date[d]), 4) if nonsolar_by_date[d] else None,
+                )
+
+        except Exception as e:
+            print(f"[{label}] _scrape_hourly_chunk_paginated exception: {e}")
+            try:
+                page.screenshot(
+                    path=f"/tmp/iex_{label.lower()}_hourly_err_{start}.png",
+                    full_page=True,
+                )
+            except Exception:
+                pass
+        finally:
+            browser.close()
 
     print(f"[{label}] Hourly chunk {start}→{end}: {len(result)} dates collected")
     return result
