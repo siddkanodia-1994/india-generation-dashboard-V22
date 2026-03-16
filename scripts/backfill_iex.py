@@ -244,7 +244,7 @@ def _set_custom_date_range(page, start: date, end: date, label: str) -> bool:
 
         # Try candidate labels in order of likelihood
         selected = False
-        for candidate in ["Custom", "Custom Range", "Custom Date Range", "Select Custom", "Customised"]:
+        for candidate in ["-Select Range-", "Custom", "Custom Range", "Custom Date Range", "Customised"]:
             opt = page.locator(
                 f"[role='option']:has-text('{candidate}'), li:has-text('{candidate}')"
             ).first
@@ -417,11 +417,21 @@ def _scrape_daily_chunk(
             custom_ok = False
             if use_custom:
                 custom_ok = _set_custom_date_range(page, start, end, label)
-                if not custom_ok:
-                    print(f"[{label}] Custom date range failed; trying Last 31 Days fallback")
-                    _click_dropdown_and_select(page, 1, "Last 31 Days", label)
-            else:
-                _click_dropdown_and_select(page, 1, "Last 31 Days", label)
+
+            if not custom_ok:
+                print(f"[{label}] Falling back to Last 31 Days")
+                try:
+                    combos2 = page.locator("[role='combobox']").all()
+                    if len(combos2) >= 2:
+                        combos2[1].click()
+                        page.wait_for_timeout(800)
+                        opt31 = page.locator("[role='option']:has-text('Last 31 Days')").first
+                        opt31.wait_for(state="visible", timeout=5000)
+                        opt31.click()
+                        print(f"[{label}] Fallback: selected Last 31 Days")
+                        page.wait_for_timeout(500)
+                except Exception as fe:
+                    print(f"[{label}] Fallback also failed: {fe}")
 
             _wait_for_table(page)
 
@@ -474,7 +484,8 @@ def scrape_daily_range(
             print(f"[{label}] Missing Date/MCP cols: {headers}")
             continue
 
-        before = len(result)
+        # Accumulate all MCP values per date, then average (table has multiple rows/day)
+        mcps_by_date: defaultdict[date, list[float]] = defaultdict(list)
         for row in data:
             if max(date_col, mcp_col) >= len(row):
                 continue
@@ -487,9 +498,13 @@ def scrape_daily_range(
             # and let _merge_rows (existing-wins) handle deduplication.
             if custom_ok and not (chunk_start <= d <= chunk_end):
                 continue
-            result[d] = round(mcp / 1000, 4)
+            mcps_by_date[d].append(mcp / 1000)
 
-        print(f"[{label}] Chunk {chunk_start}→{chunk_end}: got {len(result) - before} new dates")
+        new_dates = 0
+        for d, mcps in mcps_by_date.items():
+            result[d] = round(mean(mcps), 4)
+            new_dates += 1
+        print(f"[{label}] Chunk {chunk_start}→{chunk_end}: got {new_dates} new dates")
         time.sleep(2)  # be polite between chunks
 
     return result
