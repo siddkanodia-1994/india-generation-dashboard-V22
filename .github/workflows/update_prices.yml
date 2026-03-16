@@ -43,19 +43,13 @@ jobs:
           python scrape_stocks.py
         continue-on-error: false
 
-      - name: Run RTM scraper
-        run: |
-          cd scripts
-          python scrape_iex_rtm.py
-        continue-on-error: true   # Don't block if IEX is unavailable
-
       - name: Run DAM scraper
         run: |
           cd scripts
           python scrape_iex_dam.py
         continue-on-error: true   # Don't block if IEX is unavailable
 
-      - name: Fill solar/nonsolar for yesterday (Export download)
+      - name: Backfill RTM for yesterday + day-before (Export download)
         run: |
           YESTERDAY=$(python3 -c "from datetime import date, timedelta; print(date.today()-timedelta(1))")
           DAY_BEFORE=$(python3 -c "from datetime import date, timedelta; print(date.today()-timedelta(2))")
@@ -63,7 +57,8 @@ jobs:
           python backfill_iex.py \
             --market rtm \
             --start-date "$DAY_BEFORE" \
-            --end-date "$YESTERDAY"
+            --end-date "$YESTERDAY" \
+            --force-solar
         continue-on-error: true
 
       - name: Upload debug screenshots
