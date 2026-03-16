@@ -684,7 +684,17 @@ def backfill_dam(start: date, end: date) -> int:
     return len(missing)
 
 
-def backfill_rtm(start: date, end: date) -> int:
+def backfill_rtm(start: date, end: date, force_solar: bool = False) -> int:
+    """
+    Backfill RTM data for [start, end].
+
+    force_solar=True  →  overwrite solar/nonsolar for EVERY date in the range
+                         whose hourly data can be fetched, regardless of what
+                         is already in the CSV.  Daily RTM price is left as-is
+                         for existing rows.
+    force_solar=False →  only fill missing rows and fix obvious placeholders
+                         (where solar == nonsolar == daily).
+    """
     csv_path = CSV_PATHS["rtm"]
     rows     = _read_csv(csv_path)
     existing = _existing_dates(rows)
@@ -692,28 +702,41 @@ def backfill_rtm(start: date, end: date) -> int:
     daily  = scrape_daily_range(IEX_RTM_URL, start, end, "RTM")
     hourly = scrape_hourly_range(IEX_RTM_URL, start, end, "RTM")
 
-    if not daily:
+    if not daily and not force_solar:
         print("[RTM] No daily data scraped.")
         return 0
 
     missing = {d: v for d, v in daily.items() if d not in existing}
 
-    # Detect placeholder rows: solar == nonsolar == daily (set by earlier scripts)
-    placeholder_dates: set[date] = set()
-    for row in rows:
-        if row and not row[0].strip().lower().startswith("date") and len(row) >= 4:
-            d = _parse_csv_date(row[0])
-            if d and d in existing:
-                rtm = _parse_float(row[1])
-                sol = _parse_float(row[2])
-                nos = _parse_float(row[3])
-                if rtm and sol and nos and sol == rtm and nos == rtm:
-                    placeholder_dates.add(d)
+    if force_solar:
+        # Every date in [start, end] that has scraped hourly data will be updated
+        update_dates: set[date] = {
+            d for d in hourly if start <= d <= end
+        }
+        print(
+            f"[RTM] force_solar: will update solar/nonsolar for "
+            f"{len(update_dates)} dates in {start} → {end}"
+        )
+    else:
+        # Only fix obvious placeholders: solar == nonsolar == daily
+        placeholder_dates: set[date] = set()
+        for row in rows:
+            if row and not row[0].strip().lower().startswith("date") and len(row) >= 4:
+                d = _parse_csv_date(row[0])
+                if d and d in existing:
+                    rtm = _parse_float(row[1])
+                    sol = _parse_float(row[2])
+                    nos = _parse_float(row[3])
+                    if rtm and sol and nos and sol == rtm and nos == rtm:
+                        placeholder_dates.add(d)
+        update_dates = placeholder_dates
+        if placeholder_dates:
+            print(
+                f"[RTM] Placeholder rows to fix: "
+                f"{sorted(_format_date_csv(d) for d in placeholder_dates)}"
+            )
 
-    if placeholder_dates:
-        print(f"[RTM] Placeholder rows to fix: {sorted(_format_date_csv(d) for d in placeholder_dates)}")
-
-    if not missing and not placeholder_dates:
+    if not missing and not update_dates:
         print("[RTM] Nothing to backfill.")
         return 0
 
@@ -728,14 +751,14 @@ def backfill_rtm(start: date, end: date) -> int:
             nos if nos is not None else rtm_price,
         ]
 
-    # Fix placeholder rows in-place
+    # Update solar/nonsolar in existing rows
     fixed = 0
     updated_rows = [list(r) for r in rows]
     for i, row in enumerate(updated_rows):
         if not row or row[0].strip().lower().startswith("date"):
             continue
         d = _parse_csv_date(row[0])
-        if d and d in placeholder_dates and d in hourly:
+        if d and d in update_dates and d in hourly:
             sol, nos = hourly[d]
             if sol is not None:
                 updated_rows[i][2] = str(sol)
@@ -744,7 +767,8 @@ def backfill_rtm(start: date, end: date) -> int:
                 updated_rows[i][3] = str(nos)
 
     _write_csv(csv_path, _merge_rows(updated_rows, new_rows))
-    print(f"[RTM] Added {len(missing)} rows, fixed {fixed} placeholder solar/nonsolar")
+    action = "force-updated" if force_solar else "fixed placeholder"
+    print(f"[RTM] Added {len(missing)} rows, {action} solar/nonsolar for {fixed} existing rows")
     if missing:
         print(f"[RTM] Added: {sorted(_format_date_csv(d) for d in missing)}")
     return len(missing) + fixed
@@ -765,6 +789,15 @@ if __name__ == "__main__":
         "--end-date",
         help="End date YYYY-MM-DD (default: yesterday)",
     )
+    parser.add_argument(
+        "--force-solar",
+        action="store_true",
+        help=(
+            "RTM only: overwrite solar/nonsolar for ALL dates in range, "
+            "even if already present in CSV. Daily RTM price is kept as-is. "
+            "Use this to fix historically wrong solar/nonsolar values."
+        ),
+    )
     args = parser.parse_args()
 
     yesterday = date.today() - timedelta(days=1)
@@ -778,7 +811,10 @@ if __name__ == "__main__":
         if args.start_date else end_date - timedelta(days=30)
     )
 
-    print(f"Backfill: market={args.market}, range={start_date} → {end_date}")
+    print(
+        f"Backfill: market={args.market}, range={start_date} → {end_date}"
+        + (" [force-solar]" if args.force_solar else "")
+    )
     chunks = _date_chunks(start_date, end_date)
     print(f"Will process {len(chunks)} chunk(s) of ≤{MAX_CHUNK_DAYS} days each")
 
@@ -786,7 +822,7 @@ if __name__ == "__main__":
     if args.market in ("dam", "both"):
         total += backfill_dam(start_date, end_date)
     if args.market in ("rtm", "both"):
-        total += backfill_rtm(start_date, end_date)
+        total += backfill_rtm(start_date, end_date, force_solar=args.force_solar)
 
     print(f"\nBackfill complete. Total rows added/fixed: {total}")
     sys.exit(0)

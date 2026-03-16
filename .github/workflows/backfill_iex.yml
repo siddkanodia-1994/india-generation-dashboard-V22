@@ -25,6 +25,12 @@ on:
         default: "true"
         type: choice
         options: ["true", "false"]
+      force_solar:
+        description: "RTM: overwrite solar/nonsolar for ALL dates (fixes wrong historical values)"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
 
   # Automatic weekly run — fills any gaps without manual intervention
   # Runs every Sunday at 01:00 UTC (06:30 IST)
@@ -63,8 +69,19 @@ jobs:
         id: gen
         run: |
           SKIP_FLAG=""
-          # Default to skip_existing=true for scheduled runs and when input is "true"
+          FORCE_SOLAR_FLAG=""
+
           INPUT_SKIP="${{ github.event.inputs.skip_existing }}"
+          INPUT_FORCE="${{ github.event.inputs.force_solar }}"
+
+          # force_solar=true implies we process all RTM chunks (no skip for RTM)
+          if [ "$INPUT_FORCE" = "true" ]; then
+            FORCE_SOLAR_FLAG="--force-solar"
+            # Still skip DAM existing dates; force-solar handles RTM skip internally
+            INPUT_SKIP="true"
+          fi
+
+          # Default to skip_existing=true for scheduled runs
           if [ "$INPUT_SKIP" = "true" ] || [ -z "$INPUT_SKIP" ]; then
             SKIP_FLAG="--skip-existing"
           fi
@@ -80,7 +97,7 @@ jobs:
             --market "$MARKET" \
             --start-date "$START" \
             --end-date "${{ steps.dates.outputs.end_date }}" \
-            $SKIP_FLAG >> $GITHUB_OUTPUT
+            $SKIP_FLAG $FORCE_SOLAR_FLAG >> $GITHUB_OUTPUT
 
           echo "Matrix generation complete"
 
@@ -139,11 +156,16 @@ jobs:
       - name: Run backfill chunk
         if: matrix.market != 'none'
         run: |
+          FORCE_FLAG=""
+          if [ "${{ matrix.force_solar }}" = "true" ]; then
+            FORCE_FLAG="--force-solar"
+          fi
           cd scripts
           python backfill_iex.py \
             --market "${{ matrix.market }}" \
             --start-date "${{ matrix.start }}" \
-            --end-date "${{ matrix.end }}"
+            --end-date "${{ matrix.end }}" \
+            $FORCE_FLAG
 
       # ── Debug artifacts ─────────────────────────────────────────────────────
       - name: Upload debug screenshots
