@@ -37,12 +37,15 @@ def _format_date(d: date) -> str:
 
 def _last_date_in_sheet(ws) -> date | None:
     """Return last date in column A of an openpyxl worksheet, or None."""
+    import datetime as dt
     last = None
     for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
         val = row[0]
         if val is None:
             continue
-        if isinstance(val, date):
+        if isinstance(val, dt.datetime):
+            last = val.date()
+        elif isinstance(val, dt.date):
             last = val
         elif isinstance(val, str):
             try:

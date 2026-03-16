@@ -7,8 +7,8 @@ Columns written: Date, RTM price, Solar_Avg, NonSolar_Avg
   - NonSolar_Avg: average of 15-min block prices for 6pm–6am IST
 
 Strategy:
-  1. Try IEX REST/JSON API endpoints directly.
-  2. If blocked (403/non-JSON), fall back to Playwright headless browser.
+  1. Try IEX internal API endpoints directly (used by their own website).
+  2. If blocked, fall back to Playwright with stealth headers.
 """
 
 import csv
@@ -25,30 +25,46 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 from config import (
     CSV_PATHS,
-    IEX_RTM_SUMMARY_URL,
-    IEX_RTM_HOURLY_URL,
     RTM_SOLAR_BLOCKS,
     RTM_NONSOLAR_BLOCKS,
 )
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://www.iexindia.com/",
-    "Accept": "application/json, text/javascript, */*",
-}
+# IEX India internal API endpoints (used by their website frontend)
+IEX_BASE = "https://www.iexindia.com"
 
-SESSION = requests.Session()
-SESSION.headers.update(HEADERS)
+# These are the actual XHR endpoints the IEX website frontend calls
+IEX_RTM_ENDPOINTS = [
+    f"{IEX_BASE}/Modules/MarketData/RTM/frmRTMMarketSnapshot.aspx/GetRTMMarketSummary",
+    f"{IEX_BASE}/api/MarketData/RTM/GetRTMMarketSummary",
+    f"{IEX_BASE}/api/rtm/summary",
+    f"{IEX_BASE}/MarketData/RTM/GetMarketSummary",
+]
+
+IEX_RTM_BLOCK_ENDPOINTS = [
+    f"{IEX_BASE}/Modules/MarketData/RTM/frmRTMMarketSnapshot.aspx/GetRTMBlockPrices",
+    f"{IEX_BASE}/api/MarketData/RTM/GetRTMBlockPrices",
+    f"{IEX_BASE}/api/rtm/blockprices",
+]
+
+# Simulate a real browser session
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "X-Requested-With": "XMLHttpRequest",
+    "Referer": f"{IEX_BASE}/market-data/real-time-market/market-snapshot",
+    "Origin": IEX_BASE,
+    "Connection": "keep-alive",
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _last_date_in_csv(path: str) -> date | None:
-    """Return the last date already present in the CSV, or None."""
     p = Path(path)
     if not p.exists():
         return None
@@ -73,203 +89,274 @@ def _format_date(d: date) -> str:
 
 
 def _iex_date_param(d: date) -> str:
-    """IEX uses DD-MMM-YYYY format in query params."""
+    """IEX uses DD-MMM-YYYY format, e.g. 15-Mar-2026"""
     return d.strftime("%d-%b-%Y")
+
+
+def _iex_date_param_slash(d: date) -> str:
+    """Alternative format DD/MM/YYYY"""
+    return d.strftime("%d/%m/%Y")
+
+
+def _make_session() -> requests.Session:
+    """Create a session that looks like a real browser, including visiting homepage first."""
+    s = requests.Session()
+    s.headers.update(BROWSER_HEADERS)
+    # Visit homepage to get cookies
+    try:
+        s.get(IEX_BASE, timeout=15)
+        time.sleep(1)
+    except Exception:
+        pass
+    return s
 
 
 # ── API approach ──────────────────────────────────────────────────────────────
 
-def _fetch_rtm_summary_api(target_date: date) -> float | None:
-    """Try to get the daily weighted avg MCP via the IEX market summary API."""
-    params = {"date": _iex_date_param(target_date)}
+def _try_endpoint(session: requests.Session, url: str, payload: dict) -> dict | None:
+    """POST to an endpoint with JSON payload, return parsed JSON or None."""
     try:
-        r = SESSION.get(IEX_RTM_SUMMARY_URL, params=params, timeout=20)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        # IEX typically returns {"Status": "Success", "Data": [...]}
-        # Look for weighted average MCP field
-        if isinstance(data, dict):
-            for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP", "MCP"):
-                if key in data:
-                    return float(data[key])
-            # Dig into Data list
-            inner = data.get("Data") or data.get("data") or []
-            if inner and isinstance(inner, list):
-                prices = [float(row.get("MCP", 0) or row.get("Price", 0))
-                          for row in inner if row.get("MCP") or row.get("Price")]
-                if prices:
-                    return round(mean(prices), 2)
-        return None
+        r = session.post(url, json=payload, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            # IEX ASP.NET endpoints wrap response in {"d": ...}
+            if "d" in data:
+                inner = data["d"]
+                if isinstance(inner, str):
+                    return json.loads(inner)
+                return inner
+            return data
     except Exception:
-        return None
+        pass
 
-
-def _fetch_rtm_hourly_api(target_date: date) -> list[float] | None:
-    """
-    Fetch 96 block prices for target_date.
-    Returns a list of 96 floats (index 0 = block 1) or None on failure.
-    """
-    params = {"date": _iex_date_param(target_date)}
+    # Also try GET
     try:
-        r = SESSION.get(IEX_RTM_HOURLY_URL, params=params, timeout=20)
-        if r.status_code != 200:
-            return None
-        data = r.json()
-        blocks = data.get("Data") or data.get("data") or []
-        if not blocks or len(blocks) < 90:
-            return None
-        prices = []
-        for block in sorted(blocks, key=lambda x: int(x.get("BlockNo", x.get("Block", 0)))):
-            val = block.get("MCP") or block.get("Price") or block.get("price") or 0
-            prices.append(float(val))
-        return prices if len(prices) >= 90 else None
+        params = {k: v for k, v in payload.items()}
+        r = session.get(url, params=params, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            if "d" in data:
+                inner = data["d"]
+                if isinstance(inner, str):
+                    return json.loads(inner)
+                return inner
+            return data
     except Exception:
-        return None
+        pass
+
+    return None
 
 
-# ── Playwright fallback ───────────────────────────────────────────────────────
+def _fetch_rtm_api(target_date: date) -> tuple[float | None, list[float] | None]:
+    """Try all known IEX API endpoints to get daily MCP and block prices."""
+    session = _make_session()
+
+    date_variants = [
+        _iex_date_param(target_date),
+        _iex_date_param_slash(target_date),
+        target_date.strftime("%Y-%m-%d"),
+    ]
+
+    daily_avg = None
+    blocks = None
+
+    for date_str in date_variants:
+        payload = {"date": date_str, "Date": date_str}
+
+        # Try daily summary endpoints
+        for endpoint in IEX_RTM_ENDPOINTS:
+            result = _try_endpoint(session, endpoint, payload)
+            if result is None:
+                continue
+            print(f"[RTM] Got response from {endpoint}")
+
+            # Extract daily weighted avg MCP
+            if isinstance(result, dict):
+                for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP", "MCP",
+                            "wamcp", "avgMCP", "AvgPrice", "avgPrice"):
+                    if key in result and result[key]:
+                        try:
+                            daily_avg = round(float(result[key]), 2)
+                            break
+                        except Exception:
+                            pass
+                # Also check nested Data
+                data = result.get("Data") or result.get("data") or []
+                if isinstance(data, list) and len(data) >= 90:
+                    prices = [float(row.get("MCP") or row.get("Price") or 0) for row in data]
+                    valid = [p for p in prices if p > 0]
+                    if valid:
+                        blocks = prices
+                        if daily_avg is None:
+                            daily_avg = round(mean(valid), 2)
+
+            elif isinstance(result, list) and len(result) >= 90:
+                prices = [float(r.get("MCP") or r.get("Price") or 0) for r in result]
+                valid = [p for p in prices if p > 0]
+                if valid:
+                    blocks = prices
+                    if daily_avg is None:
+                        daily_avg = round(mean(valid), 2)
+
+            if daily_avg is not None:
+                break
+        if daily_avg is not None:
+            break
+
+    # Try block price endpoints separately if no blocks yet
+    if blocks is None:
+        for date_str in date_variants:
+            payload = {"date": date_str, "Date": date_str}
+            for endpoint in IEX_RTM_BLOCK_ENDPOINTS:
+                result = _try_endpoint(session, endpoint, payload)
+                if result is None:
+                    continue
+                data = result if isinstance(result, list) else (
+                    result.get("Data") or result.get("data") or [])
+                if isinstance(data, list) and len(data) >= 90:
+                    prices = [float(r.get("MCP") or r.get("Price") or 0) for r in data]
+                    if [p for p in prices if p > 0]:
+                        blocks = prices
+                        break
+            if blocks:
+                break
+
+    return daily_avg, blocks
+
+
+# ── Playwright fallback (stealth mode) ───────────────────────────────────────
 
 def _fetch_rtm_via_playwright(target_date: date) -> tuple[float | None, list[float] | None]:
     """
-    Use Playwright to scrape IEX RTM market snapshot page.
-    Intercepts all JSON API responses and also reads DOM table as fallback.
-    Returns (daily_avg, [96 block prices]) or (None, None).
+    Use Playwright with stealth headers to scrape IEX RTM page.
+    Injects JavaScript to call the internal API from inside the browser context.
     """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
-        print("[RTM] Playwright not installed; cannot fall back.")
+        print("[RTM] Playwright not installed.")
         return None, None
 
     date_str = _iex_date_param(target_date)
-    url = f"https://www.iexindia.com/market-data/real-time-market/market-snapshot"
-
-    intercepted_responses: list[dict] = []
-
-    def handle_response(response):
-        ct = response.headers.get("content-type", "")
-        if "json" in ct or "javascript" in ct:
-            try:
-                body = response.json()
-                intercepted_responses.append({"url": response.url, "body": body})
-            except Exception:
-                pass
+    url = f"{IEX_BASE}/market-data/real-time-market/market-snapshot"
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
+        )
         context = browser.new_context(
             user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            )
+            ),
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+            }
         )
+        # Remove automation markers
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        """)
+
         page = context.new_page()
-        page.on("response", handle_response)
+        captured_data = {"daily": None, "blocks": None}
 
-        # Navigate and wait for network to settle
-        page.goto(url, wait_until="networkidle", timeout=90000)
-        page.wait_for_timeout(5000)
-
-        # Try selecting the date if the page has a date picker
-        try:
-            page.select_option("select[name*='date'], select[id*='date']", date_str)
-            page.wait_for_timeout(3000)
-        except Exception:
-            pass
-
-        # Extract from DOM: look for tables with price data
-        html_content = page.content()
-        browser.close()
-
-    # 1. Parse intercepted JSON responses
-    daily_avg = None
-    blocks: list[float] | None = None
-
-    for item in intercepted_responses:
-        body = item["body"]
-        if not isinstance(body, dict):
-            continue
-        # Check for block data list
-        data = (body.get("Data") or body.get("data") or
-                body.get("result") or body.get("Result") or [])
-        if isinstance(data, list) and len(data) >= 90:
-            prices = []
-            for row in data:
-                val = (row.get("MCP") or row.get("Price") or row.get("price") or
-                       row.get("mcp") or row.get("BlockPrice") or 0)
-                prices.append(float(val) if val else 0)
-            valid = [p for p in prices if p > 0]
-            if valid:
-                blocks = prices
-                daily_avg = round(mean(valid), 2)
-                break
-        # Check for scalar MCP
-        for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP", "MCP", "wamcp", "avgMCP"):
-            if key in body and body[key]:
+        def handle_response(response):
+            ct = response.headers.get("content-type", "")
+            if "json" in ct:
                 try:
-                    daily_avg = round(float(body[key]), 2)
+                    body = response.json()
+                    # Look for block data
+                    if "d" in body:
+                        inner = body["d"]
+                        if isinstance(inner, str):
+                            try:
+                                inner = json.loads(inner)
+                            except Exception:
+                                pass
+                        body = inner
+                    if isinstance(body, dict):
+                        data = body.get("Data") or body.get("data") or []
+                        if isinstance(data, list) and len(data) >= 90:
+                            prices = [float(r.get("MCP") or r.get("Price") or 0) for r in data]
+                            valid = [p for p in prices if p > 0]
+                            if valid:
+                                captured_data["blocks"] = prices
+                                captured_data["daily"] = round(mean(valid), 2)
+                        for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP"):
+                            if key in body and body[key]:
+                                captured_data["daily"] = round(float(body[key]), 2)
                 except Exception:
                     pass
 
-    # 2. DOM fallback: parse HTML tables for MCP values
-    if daily_avg is None:
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html_content, "lxml")
-        text = soup.get_text(" ")
-        # Look for "Weighted Average MCP" or similar
-        for pat in [
-            r"Weighted\s+Avg(?:erage)?\s+MCP[:\s]+(\d+\.?\d*)",
-            r"WAMCP[:\s]+(\d+\.?\d*)",
-            r"Avg(?:erage)?\s+MCP[:\s]+(\d+\.?\d*)",
-        ]:
-            m = re.search(pat, text, re.IGNORECASE)
-            if m:
-                daily_avg = round(float(m.group(1)), 2)
-                break
+        page.on("response", handle_response)
+        page.goto(url, wait_until="domcontentloaded", timeout=90000)
+        page.wait_for_timeout(8000)
 
-        # Try extracting block prices from a table
-        if blocks is None:
-            tables = soup.find_all("table")
-            for table in tables:
-                rows = table.find_all("tr")
-                prices = []
-                for row in rows:
-                    cells = row.find_all("td")
-                    for cell in cells:
-                        txt = re.sub(r"[^\d.]", "", cell.get_text(strip=True))
+        # Try to call internal API using fetch from within the page context
+        for endpoint in IEX_RTM_ENDPOINTS + IEX_RTM_BLOCK_ENDPOINTS:
+            if captured_data["daily"] is not None and captured_data["blocks"] is not None:
+                break
+            try:
+                result = page.evaluate(f"""
+                    async () => {{
+                        try {{
+                            const r = await fetch('{endpoint}', {{
+                                method: 'POST',
+                                headers: {{'Content-Type': 'application/json; charset=utf-8',
+                                           'X-Requested-With': 'XMLHttpRequest'}},
+                                body: JSON.stringify({{date: '{date_str}'}})
+                            }});
+                            return await r.json();
+                        }} catch(e) {{ return null; }}
+                    }}
+                """)
+                if result:
+                    # Parse result
+                    inner = result.get("d", result)
+                    if isinstance(inner, str):
                         try:
-                            val = float(txt)
-                            if 0.5 <= val <= 50:  # reasonable RTM price range
-                                prices.append(val)
+                            inner = json.loads(inner)
                         except Exception:
                             pass
-                if len(prices) >= 90:
-                    blocks = prices
-                    if daily_avg is None:
-                        daily_avg = round(mean(prices), 2)
+                    if isinstance(inner, dict):
+                        data = inner.get("Data") or inner.get("data") or []
+                        if isinstance(data, list) and len(data) >= 90:
+                            prices = [float(r.get("MCP") or r.get("Price") or 0) for r in data]
+                            valid = [p for p in prices if p > 0]
+                            if valid:
+                                captured_data["blocks"] = prices
+                                captured_data["daily"] = round(mean(valid), 2)
+            except Exception:
+                pass
+
+        # DOM fallback: look for MCP values in the page text
+        if captured_data["daily"] is None:
+            text = page.inner_text("body")
+            for pat in [
+                r"Weighted\s+Avg(?:erage)?\s+MCP[:\s]+(\d+\.?\d*)",
+                r"WAMCP[:\s]+(\d+\.?\d*)",
+                r"Avg(?:erage)?\s+(?:Price|MCP)[:\s]+(\d+\.?\d*)",
+            ]:
+                m = re.search(pat, text, re.IGNORECASE)
+                if m:
+                    captured_data["daily"] = round(float(m.group(1)), 2)
                     break
 
-    if daily_avg is None:
-        print(f"[RTM] Playwright: no data found. Intercepted {len(intercepted_responses)} JSON responses.")
+        browser.close()
 
-    return daily_avg, blocks
+    return captured_data["daily"], captured_data["blocks"]
 
 
 # ── Main logic ────────────────────────────────────────────────────────────────
 
 def scrape_rtm(target_date: date | None = None) -> bool:
-    """
-    Scrape RTM data for target_date (defaults to yesterday).
-    Appends a row to RTM Prices.csv.
-    Returns True on success, False on failure.
-    """
     if target_date is None:
         target_date = date.today() - timedelta(days=1)
 
     csv_path = CSV_PATHS["rtm"]
 
-    # Idempotency check
     last = _last_date_in_csv(csv_path)
     if last and last >= target_date:
         print(f"[RTM] Data for {target_date} already present. Skipping.")
@@ -277,13 +364,10 @@ def scrape_rtm(target_date: date | None = None) -> bool:
 
     print(f"[RTM] Fetching data for {target_date}...")
 
-    # 1. Try API
-    daily_avg = _fetch_rtm_summary_api(target_date)
-    blocks    = _fetch_rtm_hourly_api(target_date)
+    daily_avg, blocks = _fetch_rtm_api(target_date)
 
-    # 2. Fall back to Playwright if either is missing
     if daily_avg is None or blocks is None:
-        print("[RTM] API incomplete; trying Playwright...")
+        print("[RTM] API incomplete; trying Playwright stealth mode...")
         pw_avg, pw_blocks = _fetch_rtm_via_playwright(target_date)
         if daily_avg is None:
             daily_avg = pw_avg
@@ -294,7 +378,6 @@ def scrape_rtm(target_date: date | None = None) -> bool:
         print(f"[RTM] ERROR: Could not fetch daily avg for {target_date}.")
         return False
 
-    # Calculate solar / non-solar averages from block prices
     if blocks and len(blocks) >= 96:
         solar_prices    = [blocks[i - 1] for i in RTM_SOLAR_BLOCKS    if blocks[i - 1] > 0]
         nonsolar_prices = [blocks[i - 1] for i in RTM_NONSOLAR_BLOCKS if blocks[i - 1] > 0]
@@ -309,8 +392,7 @@ def scrape_rtm(target_date: date | None = None) -> bool:
     print(f"[RTM] Writing: {row}")
 
     with open(csv_path, "a", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(row)
+        csv.writer(f).writerow(row)
 
     print(f"[RTM] Done for {target_date}.")
     return True
