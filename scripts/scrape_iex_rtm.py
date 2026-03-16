@@ -376,14 +376,20 @@ def fetch_hourly_solar_nonsolar(target_date: date) -> tuple[float | None, float 
 
                 if pg_date == target_date:
                     solar_mcps, nonsolar_mcps = [], []
+                    n_full = len(headers)  # expected columns in a full row (with Date cell)
                     for row in data:
-                        if max(hour_col, mcp_col) >= len(row):
+                        # IEX uses rowspan on the Date cell — rows after the first have
+                        # one fewer column. Shift column indices to compensate.
+                        shift = n_full - len(row)      # 0 for full row, 1 for shifted row
+                        h_col = hour_col - shift
+                        m_col = mcp_col - shift
+                        if h_col < 0 or m_col < 0 or max(h_col, m_col) >= len(row):
                             continue
                         try:
-                            hour = int(row[hour_col].strip())
+                            hour = int(row[h_col].strip())
                         except Exception:
                             continue
-                        mcp = _parse_float(row[mcp_col])
+                        mcp = _parse_float(row[m_col])
                         if mcp is None:
                             continue
                         mcp_unit = mcp / 1000
