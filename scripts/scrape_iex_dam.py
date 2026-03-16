@@ -1,5 +1,5 @@
 """
-Scrape IEX Day-Ahead Market (DAM) data via Playwright UI simulation.
+Scrape IEX Day-Ahead Market (DAM) data via Playwright URL navigation.
 
 Usage:
   python scrape_iex_dam.py                   # yesterday's finalized data (nightly cron)
@@ -8,16 +8,16 @@ Usage:
 Column written to DAM Prices.csv:
   Date, DAM price (daily avg MCP Rs/Unit)
 
-Page structure (confirmed from screenshots):
-  - "Interval" dropdown  : 15-Min-Block | Hourly | Daily | Weekly | Monthly | Yearly
-  - "Delivery Period" dropdown: Today | Yesterday | Last 8 Days | Last 31 Days
-  - Table columns: Date, Hour, Time Block, ..., MCP (Rs/MWh)
+URL param approach (confirmed from browser DevTools):
+  ?interval=DAILY&dp=LAST_8_DAYS&showGraph=false
+  Table columns: Date, Hour, Time Block, ..., MCP (Rs/MWh)
+  Multiple rows per day (15-min blocks) — average MCP for target date ÷ 1000
 """
 
 import argparse
 import csv
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import mean
 
@@ -193,51 +193,81 @@ def _parse_float(s: str) -> float | None:
         return None
 
 
+def _parse_iex_date(s: str) -> date | None:
+    s = s.strip()
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%b-%Y", "%Y-%m-%d", "%d-%m-%y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 # ── Fetch ─────────────────────────────────────────────────────────────────────
 
-def fetch_dam_daily(period: str) -> float | None:
-    """Select Interval=Daily, Delivery Period=period, return avg MCP ÷ 1000."""
+def fetch_dam_daily(target_date: date) -> float | None:
+    """
+    Navigate directly to IEX DAM URL with interval=DAILY&dp=LAST_8_DAYS,
+    filter rows matching target_date, return mean MCP ÷ 1000 (Rs/Unit).
+
+    Using URL navigation avoids dropdown interaction issues: when 'Daily'
+    interval is selected, delivery period options change to Last 8/31 Days
+    and -Select Range- only — 'Today'/'Yesterday' disappear, causing silent
+    fallback to multi-day averages.
+    """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("[DAM] Playwright not installed.")
         return None
 
-    print(f"[DAM] fetch_dam_daily period='{period}'...")
+    url = (
+        f"{IEX_DAM_URL}?interval=DAILY&dp=LAST_8_DAYS&showGraph=false"
+    )
+    print(f"[DAM] fetch_dam_daily target={target_date}, url={url}")
+
     with sync_playwright() as pw:
         browser, context = _make_browser_context(pw)
         page = context.new_page()
         try:
-            _navigate(page, IEX_DAM_URL)
-
-            # combobox[0] = Interval, combobox[1] = Delivery Period
-            if not _click_dropdown_and_select(page, 0, "Daily"):
-                _debug_page(page, "daily_interval_fail")
-                return None
-            _wait_for_table(page)
-
-            if not _click_dropdown_and_select(page, 1, period):
-                print(f"[DAM] WARNING: could not select period '{period}', using default")
-            _wait_for_table(page)
+            page.goto(url, wait_until="domcontentloaded", timeout=90000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception:
+                pass
+            try:
+                page.wait_for_selector("table tbody tr", timeout=20000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
 
             headers, data = _parse_main_table(page)
-            print(f"[DAM] Daily headers={headers}, rows={len(data)}")
-            mcp_col = _mcp_col_index(headers)
-            if mcp_col is None:
-                _debug_page(page, "daily_no_mcp")
+            print(f"[DAM] headers={headers}, total rows={len(data)}")
+
+            date_col = next((i for i, h in enumerate(headers) if "date" in h.lower()), None)
+            mcp_col  = _mcp_col_index(headers)
+            if date_col is None or mcp_col is None:
+                _debug_page(page, "daily_no_cols")
                 return None
 
-            mcps = [
-                _parse_float(row[mcp_col])
-                for row in data
-                if mcp_col < len(row) and _parse_float(row[mcp_col]) is not None
-            ]
+            mcps = []
+            for row in data:
+                if max(date_col, mcp_col) >= len(row):
+                    continue
+                d = _parse_iex_date(row[date_col])
+                if d != target_date:
+                    continue
+                v = _parse_float(row[mcp_col])
+                if v is not None:
+                    mcps.append(v)
+
+            print(f"[DAM] {target_date}: {len(mcps)} blocks with MCP data")
             if not mcps:
                 _debug_page(page, "daily_empty_mcp")
                 return None
 
             avg = round(mean(mcps) / 1000, 4)
-            print(f"[DAM] Daily avg MCP: {avg} Rs/Unit (n={len(mcps)})")
+            print(f"[DAM] avg MCP for {target_date}: {avg} Rs/Unit")
             return avg
         except Exception as e:
             print(f"[DAM] fetch_dam_daily exception: {e}")
@@ -264,7 +294,7 @@ def scrape_dam(target_date: date, period_label: str) -> bool:
 
     print(f"[DAM] Scraping period='{period_label}' for date={target_date}...")
 
-    dam_price = fetch_dam_daily(period_label)
+    dam_price = fetch_dam_daily(target_date)
 
     if dam_price is None:
         print(f"[DAM] ERROR: Could not get daily MCP for {target_date}.")

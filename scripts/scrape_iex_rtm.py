@@ -1,5 +1,5 @@
 """
-Scrape IEX Real-Time Market (RTM) data via Playwright UI simulation.
+Scrape IEX Real-Time Market (RTM) data via Playwright URL navigation.
 
 Usage:
   python scrape_iex_rtm.py                   # yesterday's finalized data (nightly cron)
@@ -8,17 +8,16 @@ Usage:
 Columns written to RTM Prices.csv:
   Date, RTM price (daily avg MCP Rs/Unit), Solar_Avg, NonSolar_Avg
 
-Page structure (confirmed from screenshots):
-  - "Interval" dropdown  : 15-Min-Block | Hourly | Daily | Weekly | Monthly | Yearly
-  - "Delivery Period" dropdown: Today | Yesterday | Last 8 Days | Last 31 Days
-  - Table columns: Date, Hour, Session ID, Time Block, ..., MCP (Rs/MWh)
-  - Summary table below main table has Avg (MW) row with daily avg MCP
+URL param approach (confirmed from browser DevTools):
+  ?interval=DAILY&dp=LAST_8_DAYS&showGraph=false  → daily avg per date
+  ?interval=HOURLY&dp=LAST_8_DAYS&showGraph=false → hourly breakdown per date
+  Multiple rows per day — filter to target date, average MCP ÷ 1000
 """
 
 import argparse
 import csv
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import mean
 
@@ -211,11 +210,26 @@ def _parse_float(s: str) -> float | None:
         return None
 
 
+def _parse_iex_date(s: str) -> date | None:
+    s = s.strip()
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%b-%Y", "%Y-%m-%d", "%d-%m-%y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
 # ── Fetch functions ───────────────────────────────────────────────────────────
 
-def fetch_daily_mcp(period: str) -> float | None:
+def fetch_daily_mcp(target_date: date) -> float | None:
     """
-    Select Interval=Daily, Delivery Period=period, read MCP (Rs/MWh) ÷ 1000.
+    Navigate to IEX RTM URL with interval=DAILY&dp=LAST_8_DAYS, filter rows
+    for target_date, return mean MCP ÷ 1000 (Rs/Unit).
+
+    URL navigation avoids the dropdown interaction bug: selecting 'Daily'
+    interval removes 'Today'/'Yesterday' from delivery period options, causing
+    the old UI approach to silently average across all 8 days instead of one.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -223,41 +237,51 @@ def fetch_daily_mcp(period: str) -> float | None:
         print("[RTM] Playwright not installed.")
         return None
 
-    print(f"[RTM] fetch_daily_mcp period='{period}'...")
+    url = f"{IEX_RTM_URL}?interval=DAILY&dp=LAST_8_DAYS&showGraph=false"
+    print(f"[RTM] fetch_daily_mcp target={target_date}")
+
     with sync_playwright() as pw:
         browser, context = _make_browser_context(pw)
         page = context.new_page()
         try:
-            _navigate(page, IEX_RTM_URL)
-
-            # combobox[0] = Interval dropdown, combobox[1] = Delivery Period dropdown
-            if not _click_dropdown_and_select(page, 0, "Daily"):
-                _debug_page(page, "daily_interval_fail")
-                return None
-            _wait_for_table(page)
-
-            if not _click_dropdown_and_select(page, 1, period):
-                print(f"[RTM] WARNING: could not select period '{period}', using default")
-            _wait_for_table(page)
+            page.goto(url, wait_until="domcontentloaded", timeout=90000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception:
+                pass
+            try:
+                page.wait_for_selector("table tbody tr", timeout=20000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
 
             headers, data = _parse_main_table(page)
-            print(f"[RTM] Daily headers={headers}, rows={len(data)}")
-            mcp_col = _mcp_col_index(headers)
-            if mcp_col is None:
-                _debug_page(page, "daily_no_mcp")
+            print(f"[RTM] Daily headers={headers}, total rows={len(data)}")
+
+            date_col = next((i for i, h in enumerate(headers) if "date" in h.lower()), None)
+            mcp_col  = _mcp_col_index(headers)
+            if date_col is None or mcp_col is None:
+                _debug_page(page, "daily_no_cols")
                 return None
 
-            mcps = [
-                _parse_float(row[mcp_col])
-                for row in data
-                if mcp_col < len(row) and _parse_float(row[mcp_col]) is not None
-            ]
+            mcps = []
+            for row in data:
+                if max(date_col, mcp_col) >= len(row):
+                    continue
+                d = _parse_iex_date(row[date_col])
+                if d != target_date:
+                    continue
+                v = _parse_float(row[mcp_col])
+                if v is not None:
+                    mcps.append(v)
+
+            print(f"[RTM] {target_date}: {len(mcps)} blocks with MCP data")
             if not mcps:
                 _debug_page(page, "daily_empty_mcp")
                 return None
 
             avg = round(mean(mcps) / 1000, 4)
-            print(f"[RTM] Daily avg MCP: {avg} Rs/Unit (n={len(mcps)})")
+            print(f"[RTM] avg MCP for {target_date}: {avg} Rs/Unit")
             return avg
         except Exception as e:
             print(f"[RTM] fetch_daily_mcp exception: {e}")
@@ -270,12 +294,12 @@ def fetch_daily_mcp(period: str) -> float | None:
     return None
 
 
-def fetch_hourly_solar_nonsolar(period: str) -> tuple[float | None, float | None]:
+def fetch_hourly_solar_nonsolar(target_date: date) -> tuple[float | None, float | None]:
     """
-    Select Interval=Hourly, Delivery Period=period.
-    Solar avg  = hours 7-18 (6am-6pm IST)
-    NonSolar avg = hours 1-6 + 19-24 (6pm-6am IST)
-    For 'Today', only averages hours that have data (MCP > 0).
+    Navigate to IEX RTM URL with interval=HOURLY&dp=LAST_8_DAYS, filter rows
+    for target_date, return (solar_avg, nonsolar_avg) in Rs/Unit.
+    Solar  = hours 7-18 (6am-6pm IST)
+    NonSolar = hours 1-6 + 19-24
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -283,33 +307,45 @@ def fetch_hourly_solar_nonsolar(period: str) -> tuple[float | None, float | None
         print("[RTM] Playwright not installed.")
         return None, None
 
-    print(f"[RTM] fetch_hourly period='{period}'...")
+    url = f"{IEX_RTM_URL}?interval=HOURLY&dp=LAST_8_DAYS&showGraph=false"
+    print(f"[RTM] fetch_hourly_solar_nonsolar target={target_date}")
+
     with sync_playwright() as pw:
         browser, context = _make_browser_context(pw)
         page = context.new_page()
         try:
-            _navigate(page, IEX_RTM_URL)
-
-            if not _click_dropdown_and_select(page, 0, "Hourly"):
-                _debug_page(page, "hourly_interval_fail")
-                return None, None
-            _wait_for_table(page)
-
-            if not _click_dropdown_and_select(page, 1, period):
-                print(f"[RTM] WARNING: could not select period '{period}', using default")
-            _wait_for_table(page)
+            page.goto(url, wait_until="domcontentloaded", timeout=90000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception:
+                pass
+            try:
+                page.wait_for_selector("table tbody tr", timeout=20000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
 
             headers, data = _parse_main_table(page)
-            print(f"[RTM] Hourly headers={headers}, rows={len(data)}")
+            print(f"[RTM] Hourly headers={headers}, total rows={len(data)}")
+
+            date_col = next((i for i, h in enumerate(headers) if "date" in h.lower()), None)
             hour_col = _hour_col_index(headers)
             mcp_col  = _mcp_col_index(headers)
-            if hour_col is None or mcp_col is None:
+            if date_col is None or hour_col is None or mcp_col is None:
                 _debug_page(page, "hourly_no_cols")
                 return None, None
 
             solar_mcps, nonsolar_mcps = [], []
+            current_date: date | None = None
             for row in data:
-                if max(hour_col, mcp_col) >= len(row):
+                if max(date_col, hour_col, mcp_col) >= len(row):
+                    continue
+                raw_date = row[date_col].strip()
+                if raw_date:
+                    parsed = _parse_iex_date(raw_date)
+                    if parsed:
+                        current_date = parsed
+                if current_date != target_date:
                     continue
                 try:
                     hour = int(row[hour_col].strip())
@@ -356,8 +392,8 @@ def scrape_rtm(target_date: date, period_label: str) -> bool:
 
     print(f"[RTM] Scraping period='{period_label}' for date={target_date}...")
 
-    daily_avg = fetch_daily_mcp(period_label)
-    solar_avg, nonsolar_avg = fetch_hourly_solar_nonsolar(period_label)
+    daily_avg = fetch_daily_mcp(target_date)
+    solar_avg, nonsolar_avg = fetch_hourly_solar_nonsolar(target_date)
 
     if daily_avg is None:
         print(f"[RTM] ERROR: Could not get daily MCP for {target_date}.")
