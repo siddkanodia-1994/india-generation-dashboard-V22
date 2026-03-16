@@ -867,20 +867,21 @@ def backfill_dam(start: date, end: date) -> int:
     return len(missing)
 
 
-def backfill_rtm(start: date, end: date) -> int:
+def backfill_rtm(start: date, end: date, force_solar: bool = False) -> int:
     """
     Backfill RTM data for [start, end].
 
     - Adds rows for dates not yet in the CSV (daily + hourly).
     - Fills empty solar/nonsolar cells for dates that already exist
       in the CSV but are missing those values (empty string or absent).
-    - Never overwrites a cell that already has a value.
+    - Never overwrites a cell that already has a value, unless
+      force_solar=True which recalculates solar/nonsolar for all dates.
     """
     csv_path = CSV_PATHS["rtm"]
     rows     = _read_csv(csv_path)
     existing = _existing_dates(rows)
 
-    # Dates in range that need solar/nonsolar filled (empty cells)
+    # Dates in range that need solar/nonsolar filled
     needs_solar: set[date] = set()
     for row in rows:
         if not row or row[0].strip().lower().startswith("date"):
@@ -889,7 +890,7 @@ def backfill_rtm(start: date, end: date) -> int:
         if d and start <= d <= end:
             sol = row[2].strip() if len(row) > 2 else ""
             nos = row[3].strip() if len(row) > 3 else ""
-            if not sol or not nos:
+            if force_solar or not sol or not nos:
                 needs_solar.add(d)
 
     missing = {d: v for d, v in
@@ -931,10 +932,10 @@ def backfill_rtm(start: date, end: date) -> int:
         while len(updated_rows[i]) < 4:
             updated_rows[i].append("")
         sol, nos = hourly[d]
-        if not updated_rows[i][2].strip() and sol is not None:
+        if (force_solar or not updated_rows[i][2].strip()) and sol is not None:
             updated_rows[i][2] = str(sol)
             filled += 1
-        if not updated_rows[i][3].strip() and nos is not None:
+        if (force_solar or not updated_rows[i][3].strip()) and nos is not None:
             updated_rows[i][3] = str(nos)
 
     _write_csv(csv_path, _merge_rows(updated_rows, new_rows))
@@ -957,6 +958,11 @@ if __name__ == "__main__":
         "--end-date",
         help="End date YYYY-MM-DD (default: yesterday)",
     )
+    parser.add_argument(
+        "--force-solar",
+        action="store_true",
+        help="Overwrite existing solar/nonsolar values (use when hour definitions change)",
+    )
     args = parser.parse_args()
 
     yesterday = date.today() - timedelta(days=1)
@@ -978,7 +984,7 @@ if __name__ == "__main__":
     if args.market in ("dam", "both"):
         total += backfill_dam(start_date, end_date)
     if args.market in ("rtm", "both"):
-        total += backfill_rtm(start_date, end_date)
+        total += backfill_rtm(start_date, end_date, force_solar=args.force_solar)
 
     print(f"\nBackfill complete. Total rows added/fixed: {total}")
     sys.exit(0)
