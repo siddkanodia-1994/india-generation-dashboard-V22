@@ -537,21 +537,33 @@ def _scrape_hourly_chunk_paginated(
     url: str, start: date, end: date, label: str
 ) -> dict[date, tuple[float | None, float | None]]:
     """
-    Navigate to the HOURLY SELECT_RANGE URL for a ≤31-day chunk and collect
-    solar/nonsolar averages per date.
+    Scrape hourly solar/nonsolar data for dates in [start, end].
 
-    IEX rendering modes (both are handled):
-      - SELECT_RANGE  → all dates/hours on ONE non-paginated table
-                        (same rendering as DAILY SELECT_RANGE)
-      - LAST_N_DAYS   → one day per page, '>' button to navigate
+    IEX DOES NOT support interval=HOURLY&dp=SELECT_RANGE — the table
+    renders empty regardless of fromDate/toDate params.
 
-    Strategy: accumulate rows grouped by date across all pages.
-    After reading each page, attempt _click_next_page. If it succeeds
-    we're in paginated mode and continue; if it fails we're done.
+    The only working mode is LAST_31_DAYS (paginated, one day per page,
+    page 1 = oldest = 31 days ago, page 31 = today).  This means data
+    older than ~31 days cannot be retrieved from IEX at all.
+
+    Strategy:
+      1. If the chunk is entirely older than 31 days → return {} immediately.
+      2. Otherwise navigate to LAST_31_DAYS and page through up to 31 pages,
+         collecting rows for any date that falls in [start, end].
     """
     from playwright.sync_api import sync_playwright
 
-    full_url = _chunk_url(url, "HOURLY", start, end)
+    today  = date.today()
+    cutoff = today - timedelta(days=31)
+
+    if end < cutoff:
+        print(
+            f"[{label}] Hourly chunk {start}→{end}: "
+            f"older than 31 days (cutoff {cutoff}) — IEX won't serve this data. Skipping."
+        )
+        return {}
+
+    full_url = f"{url}?interval=HOURLY&dp=LAST_31_DAYS&showGraph=false"
     result: dict[date, tuple[float | None, float | None]] = {}
 
     print(f"[{label}] Hourly chunk {start}→{end}: {full_url}")
