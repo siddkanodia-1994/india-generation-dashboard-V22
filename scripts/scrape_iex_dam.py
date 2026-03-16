@@ -324,11 +324,14 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    from datetime import datetime, timezone
+    IST = timezone(timedelta(hours=5, minutes=30))
+
     if args.period == "yesterday":
-        target  = date.today() - timedelta(days=1)
+        target  = datetime.now(IST).date() - timedelta(days=1)
         p_label = "Yesterday"
     else:
-        target  = date.today()
+        target  = datetime.now(IST).date()
         p_label = "Today"
 
     success = scrape_dam(target, p_label)
