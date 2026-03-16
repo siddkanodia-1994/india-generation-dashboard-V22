@@ -1,0 +1,80 @@
+name: Backfill IEX Historical Data
+
+on:
+  workflow_dispatch:
+    inputs:
+      market:
+        description: "Market to backfill"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - dam
+          - rtm
+      period:
+        description: "IEX delivery period"
+        required: true
+        default: "Last 31 Days"
+        type: choice
+        options:
+          - "Last 31 Days"
+          - "Last 8 Days"
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('scripts/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Install Playwright browsers (Chromium only)
+        run: playwright install chromium --with-deps
+
+      - name: Run backfill
+        run: |
+          cd scripts
+          python backfill_iex.py \
+            --market "${{ github.event.inputs.market }}" \
+            --period "${{ github.event.inputs.period }}"
+
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-debug-screenshots
+          path: /tmp/iex_*.png
+          if-no-files-found: ignore
+
+      - name: Commit and push backfilled data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/data/
+          if git diff --cached --quiet; then
+            echo "No new data to commit."
+          else
+            git commit -m "auto: backfill IEX ${{ github.event.inputs.market }} (${{ github.event.inputs.period }})"
+            git push
+          fi
