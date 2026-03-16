@@ -705,7 +705,7 @@ def _scrape_hourly_chunk_paginated(
                 )
                 mcp_col_dl = next(
                     (h for h in headers_dl
-                     if "mcp" in h.upper() and "weighted" not in h.lower()),
+                     if "MCP" in h.upper() and "weighted" not in h.lower()),
                     None,
                 )
 
