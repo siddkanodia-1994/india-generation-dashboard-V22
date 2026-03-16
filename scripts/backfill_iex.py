@@ -277,8 +277,10 @@ def _set_custom_date_range(page, start: date, end: date, label: str) -> bool:
     page.wait_for_timeout(800)
     page.screenshot(path=f"/tmp/iex_{label.lower()}_step2_custom_selected.png")
 
-    start_str = _format_date_iex(start)  # DD-MM-YYYY
-    end_str   = _format_date_iex(end)
+    start_str      = _format_date_iex(start)   # DD-MM-YYYY  (for logging)
+    end_str        = _format_date_iex(end)
+    start_digits   = start_str.replace("-", "")  # DDMMYYYY — MUI DatePicker accepts digits only
+    end_digits     = end_str.replace("-", "")
 
     # Step 2: fill date inputs.
     # MUI Select renders a hidden <input aria-hidden='true'> inside each combobox.
@@ -302,13 +304,18 @@ def _set_custom_date_range(page, start: date, end: date, label: str) -> bool:
             # Filter to visible, enabled inputs only (skips disabled/hidden elements)
             inputs = [inp for inp in all_inputs if inp.is_visible() and inp.is_enabled()]
             if len(inputs) >= 2:
+                # MUI DatePicker: click, then Home to guarantee cursor is at DD (first section)
                 inputs[0].click()
-                inputs[0].triple_click()
-                inputs[0].fill(start_str)
+                page.wait_for_timeout(200)
+                page.keyboard.press("Home")
+                page.wait_for_timeout(100)
+                inputs[0].type(start_digits)  # e.g. "01042022" — digits only, auto-advances DD→MM→YYYY
                 page.wait_for_timeout(300)
                 inputs[1].click()
-                inputs[1].triple_click()
-                inputs[1].fill(end_str)
+                page.wait_for_timeout(200)
+                page.keyboard.press("Home")
+                page.wait_for_timeout(100)
+                inputs[1].type(end_digits)
                 page.wait_for_timeout(300)
                 # Verify the fill worked (value should contain part of date)
                 val0 = inputs[0].input_value()
@@ -335,15 +342,18 @@ def _set_custom_date_range(page, start: date, end: date, label: str) -> bool:
             # Find first visible non-hidden input and type into it
             first_input = page.locator("input:not([aria-hidden='true'])").first
             first_input.click()
-            first_input.triple_click()
-            first_input.type(start_str)
+            page.wait_for_timeout(200)
+            page.keyboard.press("Home")
+            page.wait_for_timeout(100)
+            first_input.type(start_digits)
             page.keyboard.press("Tab")
             page.wait_for_timeout(200)
-            page.keyboard.type(end_str)
+            page.keyboard.type(end_digits)
         except Exception as e:
             print(f"[{label}] Keyboard fallback failed: {e}")
 
-    # Step 3: click "Update Report" button
+    # Step 3: click "Update Report" button (wait for it to become enabled after dates are filled)
+    page.screenshot(path=f"/tmp/iex_{label.lower()}_step2b_before_update.png")
     try:
         update_btn = page.locator(
             "button:has-text('Update Report'), "
@@ -351,9 +361,17 @@ def _set_custom_date_range(page, start: date, end: date, label: str) -> bool:
             "button:has-text('Search'), "
             "button:has-text('Go')"
         ).first
-        update_btn.wait_for(timeout=5000)
-        update_btn.click()
-        print(f"[{label}] Clicked Update Report")
+        update_btn.wait_for(state="visible", timeout=5000)
+        # Give MUI a moment to enable the button after date fill
+        for _ in range(10):
+            if update_btn.is_enabled():
+                break
+            page.wait_for_timeout(300)
+        if update_btn.is_enabled():
+            update_btn.click()
+            print(f"[{label}] Clicked Update Report")
+        else:
+            print(f"[{label}] WARNING: Update Report still disabled after date fill — skipping click")
     except Exception as e:
         print(f"[{label}] WARNING: Update Report button not found: {e}")
 
@@ -590,6 +608,11 @@ def _scrape_hourly_chunk_paginated(
             page.wait_for_selector("[role='combobox']", timeout=30000)
             page.wait_for_timeout(1500)
             print(f"[{label}] Loaded: {page.title()}")
+
+            # 1b. Explicitly select "Hourly" interval from combobox[0]
+            #     (URL param ?interval=HOURLY is unreliable — page often defaults to 15-Min-Block)
+            _click_dropdown_and_select(page, 0, "Hourly", label)
+            page.wait_for_timeout(1000)
 
             # 2. Select custom date range via the delivery period dropdown
             ok = _set_custom_date_range(page, start, end, label)
