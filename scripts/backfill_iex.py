@@ -41,8 +41,8 @@ from config import CSV_PATHS
 IEX_RTM_URL = "https://www.iexindia.com/market-data/real-time-market/market-snapshot"
 IEX_DAM_URL = "https://www.iexindia.com/market-data/day-ahead-market/market-snapshot"
 
-SOLAR_HOURS    = set(range(6, 18))            # 0-indexed: Hours 6-17 = 06:00-18:00 IST
-NONSOLAR_HOURS = set(range(0, 6)) | set(range(18, 24))  # 0-indexed: Hours 0-5 + 18-23
+SOLAR_HOURS    = set(range(8, 18))            # 0-indexed: Hours 8-17 = 08:00-18:00 IST (10h)
+NONSOLAR_HOURS = set(range(0, 8)) | set(range(18, 24))  # 0-indexed: Hours 0-7 + 18-23 = 18:00-08:00 IST (14h)
 MAX_CHUNK_DAYS = 31
 
 

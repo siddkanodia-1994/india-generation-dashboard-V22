@@ -27,8 +27,8 @@ from config import CSV_PATHS
 IEX_RTM_URL = "https://www.iexindia.com/market-data/real-time-market/market-snapshot"
 
 # IEX Hourly tab: Hour column is 0-indexed (Hour 0 = 00:00-01:00 IST)
-SOLAR_HOURS    = set(range(6, 18))            # Hours 6-17 = 06:00-18:00 IST
-NONSOLAR_HOURS = set(range(0, 6)) | set(range(18, 24))  # Hours 0-5 + 18-23 = 18:00-06:00 IST
+SOLAR_HOURS    = set(range(8, 18))            # Hours 8-17 = 08:00-18:00 IST (10h)
+NONSOLAR_HOURS = set(range(0, 8)) | set(range(18, 24))  # Hours 0-7 + 18-23 = 18:00-08:00 IST (14h)
 
 
 # ── CSV helpers ───────────────────────────────────────────────────────────────
