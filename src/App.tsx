@@ -197,7 +197,7 @@ export default function App() {
                 <ElectricityDashboard
                   type="rtm-prices-noon"
                   title="India RTM Prices Dashboard"
-                  subtitle="RTM Solar Hours (6am–6pm) avg price trends, period averages, and YoY/WoW analytics"
+                  subtitle="RTM Solar Hours (8am–6pm) avg price trends, period averages, and YoY/WoW analytics"
                   seriesLabel="RTM Prices (Solar Hours Avg)"
                   unitLabel="Rs/Unit"
                   valueColumnKey="Solar_Avg"
@@ -216,7 +216,7 @@ export default function App() {
                 <ElectricityDashboard
                   type="rtm-prices-night"
                   title="India RTM Prices Dashboard"
-                  subtitle="RTM Non-Solar Hours (6pm–6am) avg price trends, period averages, and YoY/WoW analytics"
+                  subtitle="RTM Non-Solar Hours (6pm–8am) avg price trends, period averages, and YoY/WoW analytics"
                   seriesLabel="RTM Prices (Non-Solar Hours Avg)"
                   unitLabel="Rs/Unit"
                   valueColumnKey="NonSolar_Avg"
