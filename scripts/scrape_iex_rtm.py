@@ -8,11 +8,11 @@ Usage:
 Columns written to RTM Prices.csv:
   Date, RTM price (daily avg MCP Rs/Unit), Solar_Avg, NonSolar_Avg
 
-Strategy:
-  - Navigate to IEX RTM page (wait for networkidle + extra time for React hydration)
-  - Click "Daily" interval tab → select delivery period → parse HTML table → MCP ÷ 1000
-  - Click "Hourly" interval tab → same → Solar avg hours 7-18, NonSolar hours 1-6+19-24
-  - For "Today": upsert today's row; for "Yesterday": append if not present
+Page structure (confirmed from screenshots):
+  - "Interval" dropdown  : 15-Min-Block | Hourly | Daily | Weekly | Monthly | Yearly
+  - "Delivery Period" dropdown: Today | Yesterday | Last 8 Days | Last 31 Days
+  - Table columns: Date, Hour, Session ID, Time Block, ..., MCP (Rs/MWh)
+  - Summary table below main table has Avg (MW) row with daily avg MCP
 """
 
 import argparse
@@ -27,8 +27,9 @@ from config import CSV_PATHS
 
 IEX_RTM_URL = "https://www.iexindia.com/market-data/real-time-market/market-snapshot"
 
-SOLAR_HOURS    = set(range(7, 19))
-NONSOLAR_HOURS = set(range(1, 7)) | set(range(19, 25))
+# IEX Hourly tab: Hour column is 1-indexed (Hour 1 = 00:00-01:00 IST)
+SOLAR_HOURS    = set(range(7, 19))           # Hour 7-18 → 06:00-18:00 IST
+NONSOLAR_HOURS = set(range(1, 7)) | set(range(19, 25))  # 1-6 + 19-24
 
 
 # ── CSV helpers ───────────────────────────────────────────────────────────────
@@ -109,71 +110,76 @@ def _make_browser_context(pw):
 
 def _debug_page(page, label: str) -> None:
     try:
-        title = page.title()
-        print(f"[RTM] [{label}] title='{title}'")
-        # Print visible text snippet for Cloudflare challenge detection
-        body_text = page.inner_text("body")[:400].replace("\n", " ")
-        print(f"[RTM] [{label}] body_preview='{body_text}'")
-        shot = f"/tmp/iex_rtm_{label}.png"
-        page.screenshot(path=shot, full_page=True)
-        print(f"[RTM] [{label}] screenshot: {shot}")
+        print(f"[RTM] [{label}] title='{page.title()}'")
+        body = page.inner_text("body")[:300].replace("\n", " ")
+        print(f"[RTM] [{label}] body='{body}'")
+        page.screenshot(path=f"/tmp/iex_rtm_{label}.png", full_page=True)
     except Exception as e:
         print(f"[RTM] [{label}] debug error: {e}")
 
 
-def _click_interval_tab(page, interval: str) -> bool:
-    """Try several selector strategies to click the interval tab."""
-    selectors = [
-        f"button:has-text('{interval}')",
-        f"[role='tab']:has-text('{interval}')",
-        f".MuiTab-root:has-text('{interval}')",
-        f"a:has-text('{interval}')",
-        f"li:has-text('{interval}')",
-        f"span:has-text('{interval}')",
-    ]
-    for sel in selectors:
-        try:
-            page.wait_for_selector(sel, timeout=8000)
-            page.locator(sel).first.click()
-            print(f"[RTM] Clicked '{interval}' tab via: {sel}")
-            return True
-        except Exception:
-            continue
-    return False
-
-
-def _select_period(page, period: str) -> bool:
-    """Try to pick the delivery period from the dropdown."""
-    for combo_sel in ["[role='combobox']", "select", "[aria-haspopup='listbox']"]:
-        try:
-            combo = page.locator(combo_sel).first
-            combo.wait_for(timeout=5000)
-            combo.click()
-            page.wait_for_timeout(600)
-            for opt_sel in [
-                f"[role='option']:has-text('{period}')",
-                f"li:has-text('{period}')",
-                f"option:has-text('{period}')",
-            ]:
-                try:
-                    page.locator(opt_sel).first.click(timeout=5000)
-                    print(f"[RTM] Selected period '{period}' via: {opt_sel}")
-                    return True
-                except Exception:
-                    continue
-        except Exception:
-            continue
-    return False
-
-
-def _parse_table(page) -> tuple[list[str], list[list[str]]]:
+def _navigate(page, url: str) -> None:
+    """Load page and wait for the Market Snapshot section to render."""
+    page.goto(url, wait_until="domcontentloaded", timeout=90000)
     try:
-        header_cells = page.locator("table thead th").all()
+        page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+    # Wait for the Interval dropdown to appear — confirms React has hydrated
+    page.wait_for_selector("[role='combobox']", timeout=30000)
+    page.wait_for_timeout(1000)
+    _debug_page(page, "after_load")
+
+
+def _click_dropdown_and_select(page, combo_index: int, option_text: str) -> bool:
+    """
+    Click the nth combobox (0-indexed) and select an option by text.
+    Returns True on success.
+    """
+    try:
+        combos = page.locator("[role='combobox']").all()
+        print(f"[RTM] Found {len(combos)} comboboxes")
+        if combo_index >= len(combos):
+            print(f"[RTM] No combobox at index {combo_index}")
+            return False
+        combos[combo_index].click()
+        page.wait_for_timeout(600)
+        # Options appear in a portal/listbox
+        opt = page.locator(
+            f"[role='option']:has-text('{option_text}'), "
+            f"li:has-text('{option_text}')"
+        ).first
+        opt.wait_for(timeout=5000)
+        opt.click()
+        print(f"[RTM] Selected '{option_text}' from combobox[{combo_index}]")
+        page.wait_for_timeout(500)
+        return True
+    except Exception as e:
+        print(f"[RTM] Dropdown select failed (combo={combo_index}, option='{option_text}'): {e}")
+        return False
+
+
+def _wait_for_table(page) -> None:
+    try:
+        page.wait_for_selector("table tbody tr", timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(1500)
+
+
+def _parse_main_table(page) -> tuple[list[str], list[list[str]]]:
+    """Parse the first <table> on the page (main data table)."""
+    try:
+        tables = page.locator("table").all()
+        if not tables:
+            return [], []
+        tbl = tables[0]
+        header_cells = tbl.locator("thead th").all()
         if not header_cells:
-            header_cells = page.locator("table tr:first-child th, table tr:first-child td").all()
+            header_cells = tbl.locator("tr:first-child th, tr:first-child td").all()
         headers = [th.inner_text().strip() for th in header_cells]
         data = []
-        for tr in page.locator("table tbody tr").all():
+        for tr in tbl.locator("tbody tr").all():
             cells = [td.inner_text().strip() for td in tr.locator("td").all()]
             if cells:
                 data.append(cells)
@@ -205,53 +211,40 @@ def _parse_float(s: str) -> float | None:
         return None
 
 
-def _navigate_and_prepare(page, url: str) -> None:
-    """Load page and wait for React to fully hydrate."""
-    page.goto(url, wait_until="domcontentloaded", timeout=90000)
-    # Wait for network to settle after React hydration
-    try:
-        page.wait_for_load_state("networkidle", timeout=20000)
-    except Exception:
-        pass
-    # Extra buffer for client-side rendering
-    page.wait_for_timeout(5000)
-    _debug_page(page, "after_load")
-
-
 # ── Fetch functions ───────────────────────────────────────────────────────────
 
 def fetch_daily_mcp(period: str) -> float | None:
+    """
+    Select Interval=Daily, Delivery Period=period, read MCP (Rs/MWh) ÷ 1000.
+    """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("[RTM] Playwright not installed.")
         return None
 
-    print(f"[RTM] Fetching Daily tab, period='{period}'...")
+    print(f"[RTM] fetch_daily_mcp period='{period}'...")
     with sync_playwright() as pw:
         browser, context = _make_browser_context(pw)
         page = context.new_page()
         try:
-            _navigate_and_prepare(page, IEX_RTM_URL)
+            _navigate(page, IEX_RTM_URL)
 
-            if not _click_interval_tab(page, "Daily"):
-                _debug_page(page, "daily_tab_missing")
+            # combobox[0] = Interval dropdown, combobox[1] = Delivery Period dropdown
+            if not _click_dropdown_and_select(page, 0, "Daily"):
+                _debug_page(page, "daily_interval_fail")
                 return None
-            page.wait_for_timeout(2000)
+            _wait_for_table(page)
 
-            if not _select_period(page, period):
-                print(f"[RTM] WARNING: period '{period}' not selected, using page default")
-            try:
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
-            page.wait_for_timeout(2000)
+            if not _click_dropdown_and_select(page, 1, period):
+                print(f"[RTM] WARNING: could not select period '{period}', using default")
+            _wait_for_table(page)
 
-            headers, data = _parse_table(page)
+            headers, data = _parse_main_table(page)
             print(f"[RTM] Daily headers={headers}, rows={len(data)}")
             mcp_col = _mcp_col_index(headers)
             if mcp_col is None:
-                _debug_page(page, "daily_no_mcp_col")
+                _debug_page(page, "daily_no_mcp")
                 return None
 
             mcps = [
@@ -260,14 +253,14 @@ def fetch_daily_mcp(period: str) -> float | None:
                 if mcp_col < len(row) and _parse_float(row[mcp_col]) is not None
             ]
             if not mcps:
-                _debug_page(page, "daily_no_mcp_values")
+                _debug_page(page, "daily_empty_mcp")
                 return None
 
             avg = round(mean(mcps) / 1000, 4)
             print(f"[RTM] Daily avg MCP: {avg} Rs/Unit (n={len(mcps)})")
             return avg
         except Exception as e:
-            print(f"[RTM] Daily fetch exception: {e}")
+            print(f"[RTM] fetch_daily_mcp exception: {e}")
             try:
                 _debug_page(page, "daily_exception")
             except Exception:
@@ -278,33 +271,35 @@ def fetch_daily_mcp(period: str) -> float | None:
 
 
 def fetch_hourly_solar_nonsolar(period: str) -> tuple[float | None, float | None]:
+    """
+    Select Interval=Hourly, Delivery Period=period.
+    Solar avg  = hours 7-18 (6am-6pm IST)
+    NonSolar avg = hours 1-6 + 19-24 (6pm-6am IST)
+    For 'Today', only averages hours that have data (MCP > 0).
+    """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("[RTM] Playwright not installed.")
         return None, None
 
-    print(f"[RTM] Fetching Hourly tab, period='{period}'...")
+    print(f"[RTM] fetch_hourly period='{period}'...")
     with sync_playwright() as pw:
         browser, context = _make_browser_context(pw)
         page = context.new_page()
         try:
-            _navigate_and_prepare(page, IEX_RTM_URL)
+            _navigate(page, IEX_RTM_URL)
 
-            if not _click_interval_tab(page, "Hourly"):
-                _debug_page(page, "hourly_tab_missing")
+            if not _click_dropdown_and_select(page, 0, "Hourly"):
+                _debug_page(page, "hourly_interval_fail")
                 return None, None
-            page.wait_for_timeout(2000)
+            _wait_for_table(page)
 
-            if not _select_period(page, period):
-                print(f"[RTM] WARNING: period '{period}' not selected, using page default")
-            try:
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
-            page.wait_for_timeout(2000)
+            if not _click_dropdown_and_select(page, 1, period):
+                print(f"[RTM] WARNING: could not select period '{period}', using default")
+            _wait_for_table(page)
 
-            headers, data = _parse_table(page)
+            headers, data = _parse_main_table(page)
             print(f"[RTM] Hourly headers={headers}, rows={len(data)}")
             hour_col = _hour_col_index(headers)
             mcp_col  = _mcp_col_index(headers)
@@ -337,7 +332,7 @@ def fetch_hourly_solar_nonsolar(period: str) -> tuple[float | None, float | None
             )
             return solar_avg, nonsolar_avg
         except Exception as e:
-            print(f"[RTM] Hourly fetch exception: {e}")
+            print(f"[RTM] fetch_hourly exception: {e}")
             try:
                 _debug_page(page, "hourly_exception")
             except Exception:

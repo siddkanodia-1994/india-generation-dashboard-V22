@@ -7,6 +7,11 @@ Usage:
 
 Column written to DAM Prices.csv:
   Date, DAM price (daily avg MCP Rs/Unit)
+
+Page structure (confirmed from screenshots):
+  - "Interval" dropdown  : 15-Min-Block | Hourly | Daily | Weekly | Monthly | Yearly
+  - "Delivery Period" dropdown: Today | Yesterday | Last 8 Days | Last 31 Days
+  - Table columns: Date, Hour, Time Block, ..., MCP (Rs/MWh)
 """
 
 import argparse
@@ -100,68 +105,70 @@ def _make_browser_context(pw):
 
 def _debug_page(page, label: str) -> None:
     try:
-        title = page.title()
-        print(f"[DAM] [{label}] title='{title}'")
-        body_text = page.inner_text("body")[:400].replace("\n", " ")
-        print(f"[DAM] [{label}] body_preview='{body_text}'")
-        shot = f"/tmp/iex_dam_{label}.png"
-        page.screenshot(path=shot, full_page=True)
-        print(f"[DAM] [{label}] screenshot: {shot}")
+        print(f"[DAM] [{label}] title='{page.title()}'")
+        body = page.inner_text("body")[:300].replace("\n", " ")
+        print(f"[DAM] [{label}] body='{body}'")
+        page.screenshot(path=f"/tmp/iex_dam_{label}.png", full_page=True)
     except Exception as e:
         print(f"[DAM] [{label}] debug error: {e}")
 
 
-def _click_interval_tab(page, interval: str) -> bool:
-    selectors = [
-        f"button:has-text('{interval}')",
-        f"[role='tab']:has-text('{interval}')",
-        f".MuiTab-root:has-text('{interval}')",
-        f"a:has-text('{interval}')",
-        f"li:has-text('{interval}')",
-        f"span:has-text('{interval}')",
-    ]
-    for sel in selectors:
-        try:
-            page.wait_for_selector(sel, timeout=8000)
-            page.locator(sel).first.click()
-            print(f"[DAM] Clicked '{interval}' tab via: {sel}")
-            return True
-        except Exception:
-            continue
-    return False
-
-
-def _select_period(page, period: str) -> bool:
-    for combo_sel in ["[role='combobox']", "select", "[aria-haspopup='listbox']"]:
-        try:
-            combo = page.locator(combo_sel).first
-            combo.wait_for(timeout=5000)
-            combo.click()
-            page.wait_for_timeout(600)
-            for opt_sel in [
-                f"[role='option']:has-text('{period}')",
-                f"li:has-text('{period}')",
-                f"option:has-text('{period}')",
-            ]:
-                try:
-                    page.locator(opt_sel).first.click(timeout=5000)
-                    print(f"[DAM] Selected period '{period}' via: {opt_sel}")
-                    return True
-                except Exception:
-                    continue
-        except Exception:
-            continue
-    return False
-
-
-def _parse_table(page) -> tuple[list[str], list[list[str]]]:
+def _navigate(page, url: str) -> None:
+    """Load page and wait for the Interval combobox to appear (React hydrated)."""
+    page.goto(url, wait_until="domcontentloaded", timeout=90000)
     try:
-        header_cells = page.locator("table thead th").all()
+        page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+    page.wait_for_selector("[role='combobox']", timeout=30000)
+    page.wait_for_timeout(1000)
+    _debug_page(page, "after_load")
+
+
+def _click_dropdown_and_select(page, combo_index: int, option_text: str) -> bool:
+    """Click the nth combobox and select an option by text."""
+    try:
+        combos = page.locator("[role='combobox']").all()
+        print(f"[DAM] Found {len(combos)} comboboxes")
+        if combo_index >= len(combos):
+            print(f"[DAM] No combobox at index {combo_index}")
+            return False
+        combos[combo_index].click()
+        page.wait_for_timeout(600)
+        opt = page.locator(
+            f"[role='option']:has-text('{option_text}'), "
+            f"li:has-text('{option_text}')"
+        ).first
+        opt.wait_for(timeout=5000)
+        opt.click()
+        print(f"[DAM] Selected '{option_text}' from combobox[{combo_index}]")
+        page.wait_for_timeout(500)
+        return True
+    except Exception as e:
+        print(f"[DAM] Dropdown select failed (combo={combo_index}, option='{option_text}'): {e}")
+        return False
+
+
+def _wait_for_table(page) -> None:
+    try:
+        page.wait_for_selector("table tbody tr", timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(1500)
+
+
+def _parse_main_table(page) -> tuple[list[str], list[list[str]]]:
+    try:
+        tables = page.locator("table").all()
+        if not tables:
+            return [], []
+        tbl = tables[0]
+        header_cells = tbl.locator("thead th").all()
         if not header_cells:
-            header_cells = page.locator("table tr:first-child th, table tr:first-child td").all()
+            header_cells = tbl.locator("tr:first-child th, tr:first-child td").all()
         headers = [th.inner_text().strip() for th in header_cells]
         data = []
-        for tr in page.locator("table tbody tr").all():
+        for tr in tbl.locator("tbody tr").all():
             cells = [td.inner_text().strip() for td in tr.locator("td").all()]
             if cells:
                 data.append(cells)
@@ -186,50 +193,38 @@ def _parse_float(s: str) -> float | None:
         return None
 
 
-def _navigate_and_prepare(page, url: str) -> None:
-    page.goto(url, wait_until="domcontentloaded", timeout=90000)
-    try:
-        page.wait_for_load_state("networkidle", timeout=20000)
-    except Exception:
-        pass
-    page.wait_for_timeout(5000)
-    _debug_page(page, "after_load")
-
-
 # ── Fetch ─────────────────────────────────────────────────────────────────────
 
 def fetch_dam_daily(period: str) -> float | None:
+    """Select Interval=Daily, Delivery Period=period, return avg MCP ÷ 1000."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("[DAM] Playwright not installed.")
         return None
 
-    print(f"[DAM] Fetching Daily tab, period='{period}'...")
+    print(f"[DAM] fetch_dam_daily period='{period}'...")
     with sync_playwright() as pw:
         browser, context = _make_browser_context(pw)
         page = context.new_page()
         try:
-            _navigate_and_prepare(page, IEX_DAM_URL)
+            _navigate(page, IEX_DAM_URL)
 
-            if not _click_interval_tab(page, "Daily"):
-                _debug_page(page, "daily_tab_missing")
+            # combobox[0] = Interval, combobox[1] = Delivery Period
+            if not _click_dropdown_and_select(page, 0, "Daily"):
+                _debug_page(page, "daily_interval_fail")
                 return None
-            page.wait_for_timeout(2000)
+            _wait_for_table(page)
 
-            if not _select_period(page, period):
-                print(f"[DAM] WARNING: period '{period}' not selected, using page default")
-            try:
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
-                pass
-            page.wait_for_timeout(2000)
+            if not _click_dropdown_and_select(page, 1, period):
+                print(f"[DAM] WARNING: could not select period '{period}', using default")
+            _wait_for_table(page)
 
-            headers, data = _parse_table(page)
+            headers, data = _parse_main_table(page)
             print(f"[DAM] Daily headers={headers}, rows={len(data)}")
             mcp_col = _mcp_col_index(headers)
             if mcp_col is None:
-                _debug_page(page, "daily_no_mcp_col")
+                _debug_page(page, "daily_no_mcp")
                 return None
 
             mcps = [
@@ -238,14 +233,14 @@ def fetch_dam_daily(period: str) -> float | None:
                 if mcp_col < len(row) and _parse_float(row[mcp_col]) is not None
             ]
             if not mcps:
-                _debug_page(page, "daily_no_mcp_values")
+                _debug_page(page, "daily_empty_mcp")
                 return None
 
             avg = round(mean(mcps) / 1000, 4)
             print(f"[DAM] Daily avg MCP: {avg} Rs/Unit (n={len(mcps)})")
             return avg
         except Exception as e:
-            print(f"[DAM] Daily fetch exception: {e}")
+            print(f"[DAM] fetch_dam_daily exception: {e}")
             try:
                 _debug_page(page, "daily_exception")
             except Exception:
