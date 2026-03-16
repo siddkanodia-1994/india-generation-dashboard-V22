@@ -537,19 +537,24 @@ def _scrape_hourly_chunk_paginated(
     url: str, start: date, end: date, label: str
 ) -> dict[date, tuple[float | None, float | None]]:
     """
-    Navigate to the HOURLY SELECT_RANGE URL for a ≤31-day chunk.
-    The table is PAGINATED — one day per page, page 1 = oldest day.
-    Opens ONE browser session and clicks '>' through all pages,
-    collecting solar/nonsolar for each date.
-    Returns {date: (solar_avg, nonsolar_avg)}.
+    Navigate to the HOURLY SELECT_RANGE URL for a ≤31-day chunk and collect
+    solar/nonsolar averages per date.
+
+    IEX rendering modes (both are handled):
+      - SELECT_RANGE  → all dates/hours on ONE non-paginated table
+                        (same rendering as DAILY SELECT_RANGE)
+      - LAST_N_DAYS   → one day per page, '>' button to navigate
+
+    Strategy: accumulate rows grouped by date across all pages.
+    After reading each page, attempt _click_next_page. If it succeeds
+    we're in paginated mode and continue; if it fails we're done.
     """
     from playwright.sync_api import sync_playwright
 
-    full_url  = _chunk_url(url, "HOURLY", start, end)
-    num_days  = (end - start).days + 1
+    full_url = _chunk_url(url, "HOURLY", start, end)
     result: dict[date, tuple[float | None, float | None]] = {}
 
-    print(f"[{label}] Hourly chunk {start}→{end}: navigating {num_days} pages")
+    print(f"[{label}] Hourly chunk {start}→{end}: {full_url}")
 
     with sync_playwright() as pw:
         browser, context = _make_browser_context(pw)
@@ -566,7 +571,13 @@ def _scrape_hourly_chunk_paginated(
                 pass
             page.wait_for_timeout(1500)
 
-            for day_idx in range(num_days):
+            # Accumulate MCPs per date across all pages
+            solar_by_date:    defaultdict[date, list[float]] = defaultdict(list)
+            nonsolar_by_date: defaultdict[date, list[float]] = defaultdict(list)
+            page_num = 0
+
+            while True:
+                page_num += 1
                 headers, data = _parse_main_table(page)
 
                 date_col = _col_index(headers, "Date")
@@ -577,53 +588,51 @@ def _scrape_hourly_chunk_paginated(
                 mcp_col = _col_index(headers, "MCP")
 
                 if date_col is None or hour_col is None or mcp_col is None:
-                    print(f"[{label}] Hourly page {day_idx+1}: missing cols {headers}")
-                else:
-                    # Identify this page's date (appears in first date-bearing row)
-                    pg_date = None
-                    for row in data:
-                        if date_col < len(row) and row[date_col].strip():
-                            pg_date = _parse_iex_date(row[date_col].strip())
-                            if pg_date:
-                                break
+                    print(f"[{label}] Hourly page {page_num}: missing cols {headers}")
+                    break
 
-                    print(
-                        f"[{label}] Hourly page {day_idx+1}/{num_days}: "
-                        f"date={pg_date}, rows={len(data)}"
-                    )
+                rows_this_page = 0
+                for row in data:
+                    if max(date_col, hour_col, mcp_col) >= len(row):
+                        continue
+                    d_str = row[date_col].strip()
+                    if not d_str:
+                        continue
+                    d = _parse_iex_date(d_str)
+                    if d is None or not (start <= d <= end):
+                        continue
+                    try:
+                        hour = int(row[hour_col].strip())
+                    except Exception:
+                        continue
+                    mcp = _parse_float(row[mcp_col])
+                    if mcp is None:
+                        continue
+                    mcp_unit = mcp / 1000
+                    if hour in SOLAR_HOURS:
+                        solar_by_date[d].append(mcp_unit)
+                    elif hour in NONSOLAR_HOURS:
+                        nonsolar_by_date[d].append(mcp_unit)
+                    rows_this_page += 1
 
-                    if pg_date and start <= pg_date <= end:
-                        solar_mcps:    list[float] = []
-                        nonsolar_mcps: list[float] = []
-                        for row in data:
-                            if max(hour_col, mcp_col) >= len(row):
-                                continue
-                            try:
-                                hour = int(row[hour_col].strip())
-                            except Exception:
-                                continue
-                            mcp = _parse_float(row[mcp_col])
-                            if mcp is None:
-                                continue
-                            mcp_unit = mcp / 1000
-                            if hour in SOLAR_HOURS:
-                                solar_mcps.append(mcp_unit)
-                            elif hour in NONSOLAR_HOURS:
-                                nonsolar_mcps.append(mcp_unit)
+                dates_seen = sorted(set(solar_by_date) | set(nonsolar_by_date))
+                print(
+                    f"[{label}] Hourly page {page_num}: {rows_this_page} rows, "
+                    f"{len(dates_seen)} dates so far "
+                    f"({dates_seen[0] if dates_seen else '?'} … "
+                    f"{dates_seen[-1] if dates_seen else '?'})"
+                )
 
-                        result[pg_date] = (
-                            round(mean(solar_mcps),    4) if solar_mcps    else None,
-                            round(mean(nonsolar_mcps), 4) if nonsolar_mcps else None,
-                        )
+                if not _click_next_page(page, label):
+                    break  # No more pages (non-paginated or last page)
 
-                # Navigate to next page unless this was the last
-                if day_idx < num_days - 1:
-                    if not _click_next_page(page, label):
-                        print(
-                            f"[{label}] Could not navigate to page {day_idx+2} "
-                            f"— stopping at {day_idx+1} pages"
-                        )
-                        break
+            # Compute per-date averages from accumulated MCPs
+            all_dates = set(solar_by_date) | set(nonsolar_by_date)
+            for d in all_dates:
+                result[d] = (
+                    round(mean(solar_by_date[d]),    4) if solar_by_date[d]    else None,
+                    round(mean(nonsolar_by_date[d]), 4) if nonsolar_by_date[d] else None,
+                )
 
         except Exception as e:
             print(f"[{label}] _scrape_hourly_chunk_paginated exception: {e}")
