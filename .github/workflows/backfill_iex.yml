@@ -12,14 +12,14 @@ on:
           - both
           - dam
           - rtm
-      period:
-        description: "IEX delivery period"
-        required: true
-        default: "Last 31 Days"
-        type: choice
-        options:
-          - "Last 31 Days"
-          - "Last 8 Days"
+      start_date:
+        description: "Start date (YYYY-MM-DD) — leave blank for 31 days ago"
+        required: false
+        default: ""
+      end_date:
+        description: "End date (YYYY-MM-DD) — leave blank for yesterday"
+        required: false
+        default: ""
 
 jobs:
   backfill:
@@ -54,10 +54,15 @@ jobs:
 
       - name: Run backfill
         run: |
-          cd scripts
-          python backfill_iex.py \
-            --market "${{ github.event.inputs.market }}" \
-            --period "${{ github.event.inputs.period }}"
+          ARGS="--market ${{ github.event.inputs.market }}"
+          if [ -n "${{ github.event.inputs.start_date }}" ]; then
+            ARGS="$ARGS --start-date ${{ github.event.inputs.start_date }}"
+          fi
+          if [ -n "${{ github.event.inputs.end_date }}" ]; then
+            ARGS="$ARGS --end-date ${{ github.event.inputs.end_date }}"
+          fi
+          echo "Running: python backfill_iex.py $ARGS"
+          cd scripts && python backfill_iex.py $ARGS
 
       - name: Upload debug screenshots
         if: always()
@@ -75,6 +80,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No new data to commit."
           else
-            git commit -m "auto: backfill IEX ${{ github.event.inputs.market }} (${{ github.event.inputs.period }})"
+            git commit -m "auto: backfill IEX ${{ github.event.inputs.market }} (${{ github.event.inputs.start_date }} → ${{ github.event.inputs.end_date }})"
             git push
           fi

@@ -1,29 +1,37 @@
 """
 Backfill missing IEX RTM and DAM price data.
 
-Usage:
-  python backfill_iex.py --market dam --period "Last 31 Days"
-  python backfill_iex.py --market rtm --period "Last 31 Days"
-  python backfill_iex.py --market both --period "Last 31 Days"
+Usage — preset period:
+  python backfill_iex.py --market dam
+  python backfill_iex.py --market rtm
+  python backfill_iex.py --market both
+
+Usage — custom date range (auto-split into ≤31-day chunks):
+  python backfill_iex.py --market dam --start-date 2026-01-09 --end-date 2026-03-15
+  python backfill_iex.py --market both --start-date 2026-01-09 --end-date 2026-03-15
 
 Strategy:
-  1. Open IEX page, select Interval=Daily, Delivery Period=<period>
-  2. Parse ALL date rows from the table
-  3. For RTM: also fetch Hourly data to compute solar/non-solar averages per date
-  4. For each date in scraped results:
-     - If date already exists in CSV → skip (don't overwrite good data)
-     - If date is missing → insert it in chronological order
-  5. Write back the merged CSV
+  - For each ≤31-day chunk:
+      1. Open IEX page, select Interval=Daily
+      2. Select "Custom" from Delivery Period dropdown
+      3. Enter start and end dates, click "Update Report"
+      4. Parse ALL date rows from the rendered table
+      5. For RTM: repeat with Interval=Hourly for solar/non-solar
+  - Merge scraped data with existing CSV (existing rows never overwritten)
+  - Also fixes RTM placeholder rows (solar == nonsolar == daily avg)
 
-Run twice if needed — once for "Last 31 Days" (covers last ~31 days),
-and if the gap is older, IEX only supports up to 31 days back via UI.
+IEX custom date picker:
+  - Select "Custom" from Delivery Period dropdown → two date inputs appear
+  - Max range = 31 days
+  - Click "Update Report" button to load data
 """
 
 import argparse
 import csv
 import sys
+import time
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from statistics import mean
 
@@ -35,14 +43,14 @@ IEX_DAM_URL = "https://www.iexindia.com/market-data/day-ahead-market/market-snap
 
 SOLAR_HOURS    = set(range(7, 19))
 NONSOLAR_HOURS = set(range(1, 7)) | set(range(19, 25))
+MAX_CHUNK_DAYS = 31
 
 
 # ── Date helpers ──────────────────────────────────────────────────────────────
 
 def _parse_iex_date(s: str) -> date | None:
-    """Parse IEX date formats: '09-03-2026' or '09/03/2026' → date object."""
     s = s.strip()
-    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%b-%Y", "%Y-%m-%d"):
+    for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%b-%Y", "%Y-%m-%d", "%d-%m-%y"):
         try:
             return datetime.strptime(s, fmt).date()
         except ValueError:
@@ -50,8 +58,13 @@ def _parse_iex_date(s: str) -> date | None:
     return None
 
 
-def _format_date(d: date) -> str:
+def _format_date_csv(d: date) -> str:
     return d.strftime("%d/%m/%y")
+
+
+def _format_date_iex(d: date) -> str:
+    """IEX custom date picker format: DD-MM-YYYY"""
+    return d.strftime("%d-%m-%Y")
 
 
 def _parse_csv_date(s: str) -> date | None:
@@ -64,6 +77,17 @@ def _parse_csv_date(s: str) -> date | None:
         return date(y, m, d)
     except Exception:
         return None
+
+
+def _date_chunks(start: date, end: date, chunk_size: int = MAX_CHUNK_DAYS) -> list[tuple[date, date]]:
+    """Split a date range into chunks of at most chunk_size days."""
+    chunks = []
+    current = start
+    while current <= end:
+        chunk_end = min(current + timedelta(days=chunk_size - 1), end)
+        chunks.append((current, chunk_end))
+        current = chunk_end + timedelta(days=1)
+    return chunks
 
 
 # ── CSV helpers ───────────────────────────────────────────────────────────────
@@ -92,11 +116,7 @@ def _existing_dates(rows: list[list[str]]) -> set[date]:
 
 
 def _merge_rows(existing_rows: list[list[str]], new_rows: dict[date, list]) -> list[list[str]]:
-    """
-    Insert new_rows (dict of date → csv_row) into existing_rows, sorted by date.
-    Header row (if any) is preserved at the top.
-    """
-    # Separate header
+    """Insert new_rows into existing_rows in date order. Existing rows win."""
     header = None
     data_rows = []
     for row in existing_rows:
@@ -105,7 +125,6 @@ def _merge_rows(existing_rows: list[list[str]], new_rows: dict[date, list]) -> l
         else:
             data_rows.append(row)
 
-    # Build map of existing date → row
     existing_map: dict[date, list] = {}
     undated = []
     for row in data_rows:
@@ -116,10 +135,7 @@ def _merge_rows(existing_rows: list[list[str]], new_rows: dict[date, list]) -> l
             else:
                 undated.append(row)
 
-    # Merge (existing wins)
-    merged = {**new_rows, **existing_map}  # existing_map takes priority
-
-    # Sort by date
+    merged = {**new_rows, **existing_map}  # existing wins
     sorted_rows = [merged[d] for d in sorted(merged.keys())]
 
     result = []
@@ -176,14 +192,14 @@ def _navigate(page, url: str, label: str) -> None:
         pass
     page.wait_for_selector("[role='combobox']", timeout=30000)
     page.wait_for_timeout(1000)
-    print(f"[{label}] Page loaded: {page.title()}")
+    print(f"[{label}] Loaded: {page.title()}")
 
 
 def _click_dropdown_and_select(page, combo_index: int, option_text: str, label: str) -> bool:
     try:
         combos = page.locator("[role='combobox']").all()
         if combo_index >= len(combos):
-            print(f"[{label}] No combobox at index {combo_index} (found {len(combos)})")
+            print(f"[{label}] No combobox[{combo_index}] (found {len(combos)})")
             return False
         combos[combo_index].click()
         page.wait_for_timeout(600)
@@ -196,8 +212,91 @@ def _click_dropdown_and_select(page, combo_index: int, option_text: str, label: 
         page.wait_for_timeout(500)
         return True
     except Exception as e:
-        print(f"[{label}] Dropdown select failed (combo={combo_index}, '{option_text}'): {e}")
+        print(f"[{label}] Dropdown select failed ({combo_index}, '{option_text}'): {e}")
         return False
+
+
+def _set_custom_date_range(page, start: date, end: date, label: str) -> bool:
+    """
+    Select 'Custom' from Delivery Period, fill in start/end dates, click Update Report.
+    IEX shows two date inputs when Custom is selected.
+    """
+    # Step 1: select "Custom" from delivery period dropdown (combobox[1])
+    if not _click_dropdown_and_select(page, 1, "Custom", label):
+        print(f"[{label}] Could not select 'Custom' delivery period")
+        return False
+    page.wait_for_timeout(800)
+
+    start_str = _format_date_iex(start)  # DD-MM-YYYY
+    end_str   = _format_date_iex(end)
+
+    # Step 2: fill date inputs — try several selector strategies
+    filled_start = False
+    filled_end   = False
+
+    date_input_selectors = [
+        "input[type='date']",
+        "input[placeholder*='Date'], input[placeholder*='date']",
+        "input[placeholder*='From'], input[placeholder*='from']",
+        ".MuiInputBase-input",
+        "input[type='text']",
+    ]
+
+    for sel in date_input_selectors:
+        try:
+            inputs = page.locator(sel).all()
+            if len(inputs) >= 2:
+                # Clear and type start date
+                inputs[0].click()
+                inputs[0].triple_click()
+                inputs[0].fill(start_str)
+                page.wait_for_timeout(300)
+                # Clear and type end date
+                inputs[1].click()
+                inputs[1].triple_click()
+                inputs[1].fill(end_str)
+                page.wait_for_timeout(300)
+                filled_start = True
+                filled_end   = True
+                print(f"[{label}] Filled date range {start_str} → {end_str} via '{sel}'")
+                break
+        except Exception:
+            continue
+
+    if not filled_start or not filled_end:
+        print(f"[{label}] WARNING: Could not fill date inputs; trying keyboard approach")
+        # Fallback: tab through inputs
+        try:
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(200)
+            page.keyboard.type(start_str)
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(200)
+            page.keyboard.type(end_str)
+        except Exception as e:
+            print(f"[{label}] Keyboard fallback failed: {e}")
+
+    # Step 3: click "Update Report" button
+    try:
+        update_btn = page.locator(
+            "button:has-text('Update Report'), "
+            "button:has-text('Apply'), "
+            "button:has-text('Search'), "
+            "button:has-text('Go')"
+        ).first
+        update_btn.wait_for(timeout=5000)
+        update_btn.click()
+        print(f"[{label}] Clicked Update Report")
+    except Exception as e:
+        print(f"[{label}] WARNING: Update Report button not found: {e}")
+
+    # Wait for table to refresh
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass
+    page.wait_for_timeout(2000)
+    return True
 
 
 def _wait_for_table(page) -> None:
@@ -205,7 +304,7 @@ def _wait_for_table(page) -> None:
         page.wait_for_selector("table tbody tr", timeout=15000)
     except Exception:
         pass
-    page.wait_for_timeout(2000)
+    page.wait_for_timeout(1500)
 
 
 def _parse_main_table(page) -> tuple[list[str], list[list[str]]]:
@@ -230,28 +329,24 @@ def _parse_main_table(page) -> tuple[list[str], list[list[str]]]:
 
 
 def _col_index(headers: list[str], keyword: str) -> int | None:
-    kw = keyword.upper()
     for i, h in enumerate(headers):
-        if kw in h.upper():
+        if keyword.upper() in h.upper():
             return i
     return None
 
 
-# ── Scrape functions ──────────────────────────────────────────────────────────
+# ── Core scrape: one chunk ────────────────────────────────────────────────────
 
-def scrape_daily_all_dates(url: str, period: str, label: str) -> dict[date, float]:
+def _scrape_daily_chunk(
+    url: str, interval: str, start: date, end: date,
+    label: str, use_custom: bool
+) -> tuple[list[str], list[list[str]]]:
     """
-    Select Interval=Daily, Delivery Period=period.
-    Returns {date: mcp_rs_per_unit} for all rows in the table.
+    Navigate to url, set interval, set date range, return (headers, rows).
+    use_custom=True  → select Custom delivery period + fill date inputs
+    use_custom=False → select "Last 31 Days" from dropdown
     """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print(f"[{label}] Playwright not installed.")
-        return {}
-
-    print(f"[{label}] Scraping Daily / '{period}'...")
-    result: dict[date, float] = {}
+    from playwright.sync_api import sync_playwright
 
     with sync_playwright() as pw:
         browser, context = _make_browser_context(pw)
@@ -259,225 +354,241 @@ def scrape_daily_all_dates(url: str, period: str, label: str) -> dict[date, floa
         try:
             _navigate(page, url, label)
 
-            if not _click_dropdown_and_select(page, 0, "Daily", label):
-                print(f"[{label}] Could not select Daily interval.")
-                return {}
+            # Set interval (combobox[0])
+            if not _click_dropdown_and_select(page, 0, interval, label):
+                print(f"[{label}] Could not select interval '{interval}'")
+                return [], []
             _wait_for_table(page)
 
-            if not _click_dropdown_and_select(page, 1, period, label):
-                print(f"[{label}] WARNING: could not select period '{period}'")
+            # Set delivery period
+            if use_custom:
+                if not _set_custom_date_range(page, start, end, label):
+                    print(f"[{label}] Custom date range failed; trying Last 31 Days fallback")
+                    _click_dropdown_and_select(page, 1, "Last 31 Days", label)
+            else:
+                _click_dropdown_and_select(page, 1, "Last 31 Days", label)
+
             _wait_for_table(page)
 
             headers, data = _parse_main_table(page)
-            print(f"[{label}] Daily: headers={headers}, rows={len(data)}")
+            print(f"[{label}] {interval} {start}→{end}: headers={headers}, rows={len(data)}")
 
-            date_col = _col_index(headers, "Date")
-            mcp_col  = _col_index(headers, "MCP")
-            if date_col is None or mcp_col is None:
-                print(f"[{label}] ERROR: could not find Date/MCP columns. headers={headers}")
-                page.screenshot(path=f"/tmp/iex_{label.lower()}_backfill_daily.png", full_page=True)
-                return {}
+            if not headers:
+                page.screenshot(
+                    path=f"/tmp/iex_{label.lower()}_backfill_{start}.png", full_page=True
+                )
+            return headers, data
 
-            for row in data:
-                if max(date_col, mcp_col) >= len(row):
-                    continue
-                d = _parse_iex_date(row[date_col])
-                mcp = _parse_float(row[mcp_col])
-                if d and mcp:
-                    result[d] = round(mcp / 1000, 4)
-
-            print(f"[{label}] Parsed {len(result)} date entries from Daily table")
         except Exception as e:
-            print(f"[{label}] scrape_daily_all_dates exception: {e}")
+            print(f"[{label}] _scrape_daily_chunk exception: {e}")
             try:
-                page.screenshot(path=f"/tmp/iex_{label.lower()}_backfill_err.png", full_page=True)
+                page.screenshot(
+                    path=f"/tmp/iex_{label.lower()}_backfill_err_{start}.png", full_page=True
+                )
             except Exception:
                 pass
+            return [], []
         finally:
             browser.close()
+
+
+# ── High-level scrapers ───────────────────────────────────────────────────────
+
+def scrape_daily_range(
+    url: str, start: date, end: date, label: str
+) -> dict[date, float]:
+    """
+    Scrape Daily MCP for all dates in [start, end], auto-chunking into ≤31-day windows.
+    Returns {date: mcp_rs_per_unit}.
+    """
+    chunks = _date_chunks(start, end)
+    print(f"[{label}] Daily scrape: {len(chunks)} chunk(s) for {start} → {end}")
+    result: dict[date, float] = {}
+
+    for chunk_start, chunk_end in chunks:
+        use_custom = True  # always use custom date range for backfill
+        headers, data = _scrape_daily_chunk(
+            url, "Daily", chunk_start, chunk_end, label, use_custom
+        )
+        if not headers or not data:
+            print(f"[{label}] No data for chunk {chunk_start}→{chunk_end}")
+            continue
+
+        date_col = _col_index(headers, "Date")
+        mcp_col  = _col_index(headers, "MCP")
+        if date_col is None or mcp_col is None:
+            print(f"[{label}] Missing Date/MCP cols: {headers}")
+            continue
+
+        for row in data:
+            if max(date_col, mcp_col) >= len(row):
+                continue
+            d   = _parse_iex_date(row[date_col])
+            mcp = _parse_float(row[mcp_col])
+            if d and mcp and chunk_start <= d <= chunk_end:
+                result[d] = round(mcp / 1000, 4)
+
+        print(f"[{label}] Chunk {chunk_start}→{chunk_end}: got {len([d for d in result if chunk_start <= d <= chunk_end])} dates")
+        time.sleep(2)  # be polite between chunks
 
     return result
 
 
-def scrape_hourly_all_dates(url: str, period: str, label: str) -> dict[date, tuple[float, float]]:
+def scrape_hourly_range(
+    url: str, start: date, end: date, label: str
+) -> dict[date, tuple[float | None, float | None]]:
     """
-    Select Interval=Hourly, Delivery Period=period.
-    Returns {date: (solar_avg, nonsolar_avg)} for all dates with enough data.
+    Scrape Hourly data for [start, end], return {date: (solar_avg, nonsolar_avg)}.
     """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print(f"[{label}] Playwright not installed.")
-        return {}
+    chunks = _date_chunks(start, end)
+    print(f"[{label}] Hourly scrape: {len(chunks)} chunk(s) for {start} → {end}")
+    result: dict[date, tuple[float | None, float | None]] = {}
 
-    print(f"[{label}] Scraping Hourly / '{period}'...")
-    result: dict[date, tuple[float, float]] = {}
+    for chunk_start, chunk_end in chunks:
+        headers, data = _scrape_daily_chunk(
+            url, "Hourly", chunk_start, chunk_end, label, use_custom=True
+        )
+        if not headers or not data:
+            continue
 
-    with sync_playwright() as pw:
-        browser, context = _make_browser_context(pw)
-        page = context.new_page()
-        try:
-            _navigate(page, url, label)
+        date_col = _col_index(headers, "Date")
+        hour_col = next(
+            (i for i, h in enumerate(headers) if h.strip().lower() == "hour"), None
+        )
+        mcp_col  = _col_index(headers, "MCP")
+        if date_col is None or hour_col is None or mcp_col is None:
+            print(f"[{label}] Hourly: missing cols: {headers}")
+            continue
 
-            if not _click_dropdown_and_select(page, 0, "Hourly", label):
-                print(f"[{label}] Could not select Hourly interval.")
-                return {}
-            _wait_for_table(page)
+        solar_by_date:    defaultdict[date, list[float]] = defaultdict(list)
+        nonsolar_by_date: defaultdict[date, list[float]] = defaultdict(list)
+        current_date: date | None = None
 
-            if not _click_dropdown_and_select(page, 1, period, label):
-                print(f"[{label}] WARNING: could not select period '{period}'")
-            _wait_for_table(page)
+        for row in data:
+            if max(date_col, hour_col, mcp_col) >= len(row):
+                continue
+            raw_date = row[date_col].strip()
+            if raw_date:
+                d = _parse_iex_date(raw_date)
+                if d:
+                    current_date = d
+            if current_date is None or not (chunk_start <= current_date <= chunk_end):
+                continue
+            try:
+                hour = int(row[hour_col].strip())
+            except Exception:
+                continue
+            mcp = _parse_float(row[mcp_col])
+            if mcp is None:
+                continue
+            mcp_unit = mcp / 1000
+            if hour in SOLAR_HOURS:
+                solar_by_date[current_date].append(mcp_unit)
+            elif hour in NONSOLAR_HOURS:
+                nonsolar_by_date[current_date].append(mcp_unit)
 
-            headers, data = _parse_main_table(page)
-            print(f"[{label}] Hourly: headers={headers}, rows={len(data)}")
+        for d in set(solar_by_date) | set(nonsolar_by_date):
+            s_list = solar_by_date.get(d, [])
+            n_list = nonsolar_by_date.get(d, [])
+            result[d] = (
+                round(mean(s_list), 4) if s_list else None,
+                round(mean(n_list), 4) if n_list else None,
+            )
 
-            date_col = _col_index(headers, "Date")
-            hour_col = next((i for i, h in enumerate(headers) if h.strip().lower() == "hour"), None)
-            mcp_col  = _col_index(headers, "MCP")
-            if date_col is None or hour_col is None or mcp_col is None:
-                print(f"[{label}] ERROR: missing Date/Hour/MCP cols. headers={headers}")
-                return {}
-
-            # Group by date
-            solar_by_date:    defaultdict[date, list[float]] = defaultdict(list)
-            nonsolar_by_date: defaultdict[date, list[float]] = defaultdict(list)
-
-            current_date = None
-            for row in data:
-                if max(date_col, hour_col, mcp_col) >= len(row):
-                    continue
-                # IEX Hourly table: Date column may be blank for rows after the first row of a date
-                raw_date = row[date_col].strip()
-                if raw_date:
-                    d = _parse_iex_date(raw_date)
-                    if d:
-                        current_date = d
-                if current_date is None:
-                    continue
-                try:
-                    hour = int(row[hour_col].strip())
-                except Exception:
-                    continue
-                mcp = _parse_float(row[mcp_col])
-                if mcp is None:
-                    continue
-                mcp_unit = mcp / 1000
-                if hour in SOLAR_HOURS:
-                    solar_by_date[current_date].append(mcp_unit)
-                elif hour in NONSOLAR_HOURS:
-                    nonsolar_by_date[current_date].append(mcp_unit)
-
-            for d in set(solar_by_date) | set(nonsolar_by_date):
-                s_list = solar_by_date.get(d, [])
-                n_list = nonsolar_by_date.get(d, [])
-                solar_avg    = round(mean(s_list), 4) if s_list else None
-                nonsolar_avg = round(mean(n_list), 4) if n_list else None
-                result[d] = (solar_avg, nonsolar_avg)
-
-            print(f"[{label}] Hourly: got solar/nonsolar for {len(result)} dates")
-        except Exception as e:
-            print(f"[{label}] scrape_hourly_all_dates exception: {e}")
-        finally:
-            browser.close()
+        print(f"[{label}] Hourly chunk {chunk_start}→{chunk_end}: {len(result)} dates with solar/nonsolar")
+        time.sleep(2)
 
     return result
 
 
 # ── Backfill logic ────────────────────────────────────────────────────────────
 
-def backfill_dam(period: str) -> int:
+def backfill_dam(start: date, end: date) -> int:
     csv_path = CSV_PATHS["dam"]
-    rows = _read_csv(csv_path)
+    rows     = _read_csv(csv_path)
     existing = _existing_dates(rows)
 
-    daily = scrape_daily_all_dates(IEX_DAM_URL, period, "DAM")
+    daily = scrape_daily_range(IEX_DAM_URL, start, end, "DAM")
     if not daily:
-        print("[DAM] No data scraped. Aborting.")
+        print("[DAM] No data scraped.")
         return 0
 
     missing = {d: v for d, v in daily.items() if d not in existing}
-    print(f"[DAM] Found {len(daily)} scraped dates, {len(missing)} missing from CSV")
-
+    print(f"[DAM] Scraped {len(daily)} dates, {len(missing)} missing from CSV")
     if not missing:
         print("[DAM] Nothing to backfill.")
         return 0
 
-    new_rows = {d: [_format_date(d), v, "", ""] for d, v in missing.items()}
-    merged = _merge_rows(rows, new_rows)
-    _write_csv(csv_path, merged)
-
-    added = sorted(missing.keys())
-    print(f"[DAM] Added {len(added)} rows: {[_format_date(d) for d in added]}")
-    return len(added)
+    new_rows = {d: [_format_date_csv(d), v, "", ""] for d, v in missing.items()}
+    _write_csv(csv_path, _merge_rows(rows, new_rows))
+    print(f"[DAM] Added: {sorted(_format_date_csv(d) for d in missing)}")
+    return len(missing)
 
 
-def backfill_rtm(period: str) -> int:
+def backfill_rtm(start: date, end: date) -> int:
     csv_path = CSV_PATHS["rtm"]
-    rows = _read_csv(csv_path)
+    rows     = _read_csv(csv_path)
     existing = _existing_dates(rows)
 
-    daily   = scrape_daily_all_dates(IEX_RTM_URL, period, "RTM")
-    hourly  = scrape_hourly_all_dates(IEX_RTM_URL, period, "RTM")
+    daily  = scrape_daily_range(IEX_RTM_URL, start, end, "RTM")
+    hourly = scrape_hourly_range(IEX_RTM_URL, start, end, "RTM")
 
     if not daily:
-        print("[RTM] No daily data scraped. Aborting.")
+        print("[RTM] No daily data scraped.")
         return 0
 
     missing = {d: v for d, v in daily.items() if d not in existing}
-    print(f"[RTM] Found {len(daily)} scraped dates, {len(missing)} missing from CSV")
 
-    # Also fix placeholder rows (solar == daily avg, which we set as placeholder)
-    # Identified by solar_avg == nonsolar_avg == rtm_price (placeholder pattern)
+    # Detect placeholder rows: solar == nonsolar == daily (set by earlier scripts)
     placeholder_dates: set[date] = set()
     for row in rows:
-        if row and not row[0].strip().lower().startswith("date"):
+        if row and not row[0].strip().lower().startswith("date") and len(row) >= 4:
             d = _parse_csv_date(row[0])
-            if d and d in existing and len(row) >= 4:
+            if d and d in existing:
                 rtm = _parse_float(row[1])
-                solar = _parse_float(row[2])
-                nonsolar = _parse_float(row[3])
-                if rtm and solar and nonsolar and solar == rtm and nonsolar == rtm:
+                sol = _parse_float(row[2])
+                nos = _parse_float(row[3])
+                if rtm and sol and nos and sol == rtm and nos == rtm:
                     placeholder_dates.add(d)
 
     if placeholder_dates:
-        print(f"[RTM] Found {len(placeholder_dates)} rows with placeholder solar/nonsolar: "
-              f"{[_format_date(d) for d in sorted(placeholder_dates)]}")
+        print(f"[RTM] Placeholder rows to fix: {sorted(_format_date_csv(d) for d in placeholder_dates)}")
 
     if not missing and not placeholder_dates:
         print("[RTM] Nothing to backfill.")
         return 0
 
-    # Build new_rows for missing dates
+    # Build new rows for missing dates
     new_rows: dict[date, list] = {}
     for d, rtm_price in missing.items():
-        solar_avg, nonsolar_avg = hourly.get(d, (None, None))
-        solar_avg    = solar_avg    if solar_avg    is not None else rtm_price
-        nonsolar_avg = nonsolar_avg if nonsolar_avg is not None else rtm_price
-        new_rows[d] = [_format_date(d), rtm_price, solar_avg, nonsolar_avg]
+        sol, nos = hourly.get(d, (None, None))
+        new_rows[d] = [
+            _format_date_csv(d),
+            rtm_price,
+            sol if sol is not None else rtm_price,
+            nos if nos is not None else rtm_price,
+        ]
 
     # Fix placeholder rows in-place
     fixed = 0
-    updated_rows = list(rows)
+    updated_rows = [list(r) for r in rows]
     for i, row in enumerate(updated_rows):
-        if row and not row[0].strip().lower().startswith("date"):
-            d = _parse_csv_date(row[0])
-            if d and d in placeholder_dates and d in hourly:
-                solar_avg, nonsolar_avg = hourly[d]
-                rtm_price = _parse_float(row[1])
-                if solar_avg is not None:
-                    updated_rows[i][2] = str(solar_avg)
-                    fixed += 1
-                if nonsolar_avg is not None:
-                    updated_rows[i][3] = str(nonsolar_avg)
+        if not row or row[0].strip().lower().startswith("date"):
+            continue
+        d = _parse_csv_date(row[0])
+        if d and d in placeholder_dates and d in hourly:
+            sol, nos = hourly[d]
+            if sol is not None:
+                updated_rows[i][2] = str(sol)
+                fixed += 1
+            if nos is not None:
+                updated_rows[i][3] = str(nos)
 
-    merged = _merge_rows(updated_rows, new_rows)
-    _write_csv(csv_path, merged)
-
-    added = sorted(missing.keys())
-    print(f"[RTM] Added {len(added)} rows, fixed {fixed} placeholder solar/nonsolar values")
-    if added:
-        print(f"[RTM] Added dates: {[_format_date(d) for d in added]}")
-    return len(added) + fixed
+    _write_csv(csv_path, _merge_rows(updated_rows, new_rows))
+    print(f"[RTM] Added {len(missing)} rows, fixed {fixed} placeholder solar/nonsolar")
+    if missing:
+        print(f"[RTM] Added: {sorted(_format_date_csv(d) for d in missing)}")
+    return len(missing) + fixed
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -485,23 +596,38 @@ def backfill_rtm(period: str) -> int:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backfill missing IEX RTM/DAM data")
     parser.add_argument(
-        "--market",
-        choices=["rtm", "dam", "both"],
-        default="both",
-        help="Which market to backfill (default: both)",
+        "--market", choices=["rtm", "dam", "both"], default="both",
     )
     parser.add_argument(
-        "--period",
-        default="Last 31 Days",
-        help="IEX delivery period to use (default: 'Last 31 Days')",
+        "--start-date",
+        help="Start date YYYY-MM-DD (default: 31 days ago)",
+    )
+    parser.add_argument(
+        "--end-date",
+        help="End date YYYY-MM-DD (default: yesterday)",
     )
     args = parser.parse_args()
 
+    yesterday = date.today() - timedelta(days=1)
+
+    end_date = (
+        datetime.strptime(args.end_date, "%Y-%m-%d").date()
+        if args.end_date else yesterday
+    )
+    start_date = (
+        datetime.strptime(args.start_date, "%Y-%m-%d").date()
+        if args.start_date else end_date - timedelta(days=30)
+    )
+
+    print(f"Backfill: market={args.market}, range={start_date} → {end_date}")
+    chunks = _date_chunks(start_date, end_date)
+    print(f"Will process {len(chunks)} chunk(s) of ≤{MAX_CHUNK_DAYS} days each")
+
     total = 0
     if args.market in ("dam", "both"):
-        total += backfill_dam(args.period)
+        total += backfill_dam(start_date, end_date)
     if args.market in ("rtm", "both"):
-        total += backfill_rtm(args.period)
+        total += backfill_rtm(start_date, end_date)
 
     print(f"\nBackfill complete. Total rows added/fixed: {total}")
-    sys.exit(0 if total >= 0 else 1)
+    sys.exit(0)
