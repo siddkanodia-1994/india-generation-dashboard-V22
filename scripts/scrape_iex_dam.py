@@ -9,6 +9,7 @@ Strategy:
 """
 
 import csv
+import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -99,37 +100,66 @@ def _fetch_dam_via_playwright(target_date: date) -> float | None:
         print("[DAM] Playwright not installed; cannot fall back.")
         return None
 
-    url = (
-        f"https://www.iexindia.com/market-data/day-ahead-market/market-snapshot"
-        f"?date={_iex_date_param(target_date)}"
-    )
+    url = "https://www.iexindia.com/market-data/day-ahead-market/market-snapshot"
+    intercepted_responses: list[dict] = []
+
+    def handle_response(response):
+        ct = response.headers.get("content-type", "")
+        if "json" in ct or "javascript" in ct:
+            try:
+                body = response.json()
+                intercepted_responses.append({"url": response.url, "body": body})
+            except Exception:
+                pass
+
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
-        page = browser.new_page()
-        intercepted: list[dict] = []
-
-        def handle_response(response):
-            if "DAM" in response.url or "dam" in response.url.lower():
-                try:
-                    body = response.json()
-                    intercepted.append(body)
-                except Exception:
-                    pass
-
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+        )
+        page = context.new_page()
         page.on("response", handle_response)
-        page.goto(url, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(3000)
+        page.goto(url, wait_until="networkidle", timeout=90000)
+        page.wait_for_timeout(5000)
+        html_content = page.content()
         browser.close()
 
-    for body in intercepted:
-        if isinstance(body, dict):
-            for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP"):
-                if key in body:
+    # 1. Parse intercepted JSON
+    for item in intercepted_responses:
+        body = item["body"]
+        if not isinstance(body, dict):
+            continue
+        for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP", "MCP"):
+            if key in body and body[key]:
+                try:
                     return round(float(body[key]), 2)
-            data = body.get("Data") or body.get("data") or []
-            if isinstance(data, list) and len(data) >= 20:
-                prices = [float(r.get("MCP") or r.get("Price") or 0) for r in data]
-                return round(mean([p for p in prices if p > 0]), 2)
+                except Exception:
+                    pass
+        data = (body.get("Data") or body.get("data") or
+                body.get("result") or body.get("Result") or [])
+        if isinstance(data, list) and len(data) >= 20:
+            prices = [float(r.get("MCP") or r.get("Price") or 0) for r in data]
+            valid = [p for p in prices if p > 0]
+            if valid:
+                return round(mean(valid), 2)
+
+    # 2. DOM fallback
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(html_content, "lxml")
+    text = soup.get_text(" ")
+    for pat in [
+        r"Weighted\s+Avg(?:erage)?\s+MCP[:\s]+(\d+\.?\d*)",
+        r"WAMCP[:\s]+(\d+\.?\d*)",
+        r"Avg(?:erage)?\s+(?:DAM\s+)?(?:Price|MCP)[:\s]+(\d+\.?\d*)",
+    ]:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            return round(float(m.group(1)), 2)
+
+    print(f"[DAM] Playwright: no data found. Intercepted {len(intercepted_responses)} JSON responses.")
     return None
 
 

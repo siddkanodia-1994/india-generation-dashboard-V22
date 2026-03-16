@@ -129,18 +129,31 @@ def _scrape_screener(ticker: str) -> dict | None:
                         pass
 
     # ── P/B Ratio ─────────────────────────────────────────────────────────
+    # Screener.in labels: "Price to Book value", "Price to book value", "P/B"
+    pb_keywords = ["price to book", "p/b", "pb ratio", "book value"]
     for li in soup.find_all("li"):
         name_el = li.find("span", class_="name")
         num_el  = li.find("span", class_="number")
         if name_el and num_el:
             label = name_el.get_text(strip=True).lower()
-            if "price to book" in label or "p/b" in label or "pb ratio" in label:
+            if any(kw in label for kw in pb_keywords):
                 text = re.sub(r"[^\d.]", "", num_el.get_text())
                 try:
                     pb = float(text)
                 except Exception:
                     pass
                 break
+    # Fallback: search raw text for "Price to Book" pattern
+    if pb is None:
+        pb_match = re.search(
+            r"Price\s+to\s+Book\s+[Vv]alue\s*[\n\r\s]*(\d+\.?\d*)",
+            soup.get_text(" ", strip=True)
+        )
+        if pb_match:
+            try:
+                pb = float(pb_match.group(1))
+            except Exception:
+                pass
 
     if price is None and pb is None:
         print(f"[STOCKS] WARNING: No data found for {ticker} at {url}")
@@ -168,8 +181,14 @@ def _update_xlsx(results: dict[str, dict | None], target_date: date) -> bool:
         wb.active.title = "Prices"
         wb.create_sheet("P/B")
 
+    # Note: "/" is not allowed in Excel sheet names — use "PB" instead of "P/B"
+    # Handle existing workbooks that may have "P/B" sheet name
+    pb_sheet_name = "PB"
+    if "P/B" in wb.sheetnames:
+        wb["P/B"].title = "PB"
+
     prices_ws = wb["Prices"] if "Prices" in wb.sheetnames else wb.active
-    pb_ws     = wb["P/B"]    if "P/B"    in wb.sheetnames else wb.create_sheet("P/B")
+    pb_ws     = wb[pb_sheet_name] if pb_sheet_name in wb.sheetnames else wb.create_sheet(pb_sheet_name)
 
     # Ensure headers exist
     if prices_ws.max_row == 0 or prices_ws.cell(1, 1).value is None:

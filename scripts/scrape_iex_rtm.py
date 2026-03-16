@@ -132,7 +132,8 @@ def _fetch_rtm_hourly_api(target_date: date) -> list[float] | None:
 
 def _fetch_rtm_via_playwright(target_date: date) -> tuple[float | None, list[float] | None]:
     """
-    Use Playwright to scrape the IEX RTM market snapshot page.
+    Use Playwright to scrape IEX RTM market snapshot page.
+    Intercepts all JSON API responses and also reads DOM table as fallback.
     Returns (daily_avg, [96 block prices]) or (None, None).
     """
     try:
@@ -141,44 +142,117 @@ def _fetch_rtm_via_playwright(target_date: date) -> tuple[float | None, list[flo
         print("[RTM] Playwright not installed; cannot fall back.")
         return None, None
 
-    url = (
-        f"https://www.iexindia.com/market-data/real-time-market/market-snapshot"
-        f"?date={_iex_date_param(target_date)}"
-    )
+    date_str = _iex_date_param(target_date)
+    url = f"https://www.iexindia.com/market-data/real-time-market/market-snapshot"
+
+    intercepted_responses: list[dict] = []
+
+    def handle_response(response):
+        ct = response.headers.get("content-type", "")
+        if "json" in ct or "javascript" in ct:
+            try:
+                body = response.json()
+                intercepted_responses.append({"url": response.url, "body": body})
+            except Exception:
+                pass
+
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
-        page = browser.new_page()
-        intercepted: list[dict] = []
+        context = browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            )
+        )
+        page = context.new_page()
+        page.on("response", handle_response)
 
-        def handle_response(response):
-            if "RTM" in response.url or "rtm" in response.url.lower():
+        # Navigate and wait for network to settle
+        page.goto(url, wait_until="networkidle", timeout=90000)
+        page.wait_for_timeout(5000)
+
+        # Try selecting the date if the page has a date picker
+        try:
+            page.select_option("select[name*='date'], select[id*='date']", date_str)
+            page.wait_for_timeout(3000)
+        except Exception:
+            pass
+
+        # Extract from DOM: look for tables with price data
+        html_content = page.content()
+        browser.close()
+
+    # 1. Parse intercepted JSON responses
+    daily_avg = None
+    blocks: list[float] | None = None
+
+    for item in intercepted_responses:
+        body = item["body"]
+        if not isinstance(body, dict):
+            continue
+        # Check for block data list
+        data = (body.get("Data") or body.get("data") or
+                body.get("result") or body.get("Result") or [])
+        if isinstance(data, list) and len(data) >= 90:
+            prices = []
+            for row in data:
+                val = (row.get("MCP") or row.get("Price") or row.get("price") or
+                       row.get("mcp") or row.get("BlockPrice") or 0)
+                prices.append(float(val) if val else 0)
+            valid = [p for p in prices if p > 0]
+            if valid:
+                blocks = prices
+                daily_avg = round(mean(valid), 2)
+                break
+        # Check for scalar MCP
+        for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP", "MCP", "wamcp", "avgMCP"):
+            if key in body and body[key]:
                 try:
-                    body = response.json()
-                    intercepted.append({"url": response.url, "body": body})
+                    daily_avg = round(float(body[key]), 2)
                 except Exception:
                     pass
 
-        page.on("response", handle_response)
-        page.goto(url, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(3000)
-        browser.close()
-
-    # Parse from intercepted XHR calls
-    daily_avg = None
-    blocks = None
-    for item in intercepted:
-        body = item["body"]
-        if isinstance(body, dict):
-            data = body.get("Data") or body.get("data") or []
-            if isinstance(data, list) and len(data) >= 90:
-                prices = [float(row.get("MCP") or row.get("Price") or 0)
-                          for row in data]
-                blocks = prices
-                daily_avg = round(mean(prices), 2)
+    # 2. DOM fallback: parse HTML tables for MCP values
+    if daily_avg is None:
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_content, "lxml")
+        text = soup.get_text(" ")
+        # Look for "Weighted Average MCP" or similar
+        for pat in [
+            r"Weighted\s+Avg(?:erage)?\s+MCP[:\s]+(\d+\.?\d*)",
+            r"WAMCP[:\s]+(\d+\.?\d*)",
+            r"Avg(?:erage)?\s+MCP[:\s]+(\d+\.?\d*)",
+        ]:
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                daily_avg = round(float(m.group(1)), 2)
                 break
-            for key in ("WeightedAvgMCP", "WAMCP", "AvgMCP"):
-                if key in body:
-                    daily_avg = float(body[key])
+
+        # Try extracting block prices from a table
+        if blocks is None:
+            tables = soup.find_all("table")
+            for table in tables:
+                rows = table.find_all("tr")
+                prices = []
+                for row in rows:
+                    cells = row.find_all("td")
+                    for cell in cells:
+                        txt = re.sub(r"[^\d.]", "", cell.get_text(strip=True))
+                        try:
+                            val = float(txt)
+                            if 0.5 <= val <= 50:  # reasonable RTM price range
+                                prices.append(val)
+                        except Exception:
+                            pass
+                if len(prices) >= 90:
+                    blocks = prices
+                    if daily_avg is None:
+                        daily_avg = round(mean(prices), 2)
+                    break
+
+    if daily_avg is None:
+        print(f"[RTM] Playwright: no data found. Intercepted {len(intercepted_responses)} JSON responses.")
+
     return daily_avg, blocks
 
 
