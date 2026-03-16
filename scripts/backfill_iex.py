@@ -642,16 +642,24 @@ def _scrape_hourly_chunk_paginated(
             nonsolar_by_date: defaultdict[date, list[float]] = defaultdict(list)
 
             try:
+                # Export is a two-step click: first open the Export popover,
+                # then click "Export Excel" from the sub-menu.
                 export_btn = page.locator(
                     "button:has-text('Export'), "
-                    "button:has-text('export'), "
                     "[aria-label*='xport'], "
                     "[title*='xport']"
                 ).first
                 export_btn.wait_for(state="visible", timeout=10000)
+                export_btn.click()
+                page.wait_for_timeout(600)  # wait for sub-menu to appear
 
                 with page.expect_download(timeout=60000) as dl_info:
-                    export_btn.click()
+                    page.locator(
+                        "[role='menuitem']:has-text('Export Excel'), "
+                        "li:has-text('Export Excel'), "
+                        "a:has-text('Export Excel'), "
+                        "button:has-text('Export Excel')"
+                    ).first.click()
 
                 download = dl_info.value
                 suffix = Path(download.suggested_filename).suffix.lower() or ".csv"
@@ -720,6 +728,12 @@ def _scrape_hourly_chunk_paginated(
                         path=f"/tmp/iex_{label.lower()}_export_err_{start}.png",
                         full_page=True,
                     )
+                except Exception:
+                    pass
+                # Dismiss Export popover (if still open) so it doesn't block pagination clicks
+                try:
+                    page.keyboard.press("Escape")
+                    page.wait_for_timeout(500)
                 except Exception:
                     pass
                 # Fallback: original row-by-row pagination
