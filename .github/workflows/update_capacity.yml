@@ -1,0 +1,55 @@
+name: Update Capacity Data (ICED NITI - Monthly)
+
+on:
+  schedule:
+    # Run on the 5th of each month at 4:30am UTC (10am IST)
+    - cron: "30 4 5 * *"
+  workflow_dispatch:   # Allow manual trigger
+
+jobs:
+  update-capacity:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('scripts/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Install Playwright browsers (Chromium only)
+        run: playwright install chromium --with-deps
+
+      - name: Run capacity scraper (ICED NITI)
+        run: |
+          cd scripts
+          python run_all.py --mode capacity
+
+      - name: Commit and push updated data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/data/
+          if git diff --cached --quiet; then
+            echo "No capacity data changes to commit."
+          else
+            git commit -m "auto: update capacity data $(date -u +'%Y-%m')"
+            git push
+          fi

@@ -1,0 +1,66 @@
+name: Update Generation Data (Grid India PSP + Coal PLF)
+
+on:
+  schedule:
+    # Run every 30 min from 9:00am–11:00am IST (3:30am–5:30am UTC)
+    # until PDF becomes available. Script exits 0 if data already present,
+    # exits 2 if PDF not yet published (all subsequent retries are no-ops once done).
+    - cron: "30 3 * * *"   # 9:00am IST
+    - cron: "0 4 * * *"    # 9:30am IST
+    - cron: "30 4 * * *"   # 10:00am IST
+    - cron: "0 5 * * *"    # 10:30am IST
+    - cron: "30 5 * * *"   # 11:00am IST
+  workflow_dispatch:   # Allow manual trigger for testing
+
+jobs:
+  update-generation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('scripts/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run generation scrapers (Grid India PSP + Coal PLF)
+        id: scrape
+        run: |
+          cd scripts
+          python run_all.py --mode generation
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+        continue-on-error: true
+
+      - name: Commit and push updated data
+        if: steps.scrape.outputs.exit_code == '0'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/data/
+          if git diff --cached --quiet; then
+            echo "No data changes to commit."
+          else
+            git commit -m "auto: update generation data $(date -u +'%Y-%m-%d')"
+            git push
+          fi
+
+      - name: PDF not yet available (will retry at next cron)
+        if: steps.scrape.outputs.exit_code == '2'
+        run: echo "PSP PDF not yet published. Next cron run will retry."

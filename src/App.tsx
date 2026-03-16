@@ -168,8 +168,8 @@ export default function App() {
               <div className="mt-2">
                 <TabList>
                   <Tab>RTM Prices</Tab>
-                  <Tab>12 Noon</Tab>
-                  <Tab>9 PM</Tab>
+                  <Tab>Solar Hours</Tab>
+                  <Tab>Non-Solar Hours</Tab>
                 </TabList>
               </div>
 
@@ -197,10 +197,10 @@ export default function App() {
                 <ElectricityDashboard
                   type="rtm-prices-noon"
                   title="India RTM Prices Dashboard"
-                  subtitle="RTM 12 Noon price trends, period averages, and YoY/WoW analytics"
-                  seriesLabel="RTM Prices (12 Noon)"
+                  subtitle="RTM Solar Hours (6am–6pm) avg price trends, period averages, and YoY/WoW analytics"
+                  seriesLabel="RTM Prices (Solar Hours Avg)"
                   unitLabel="Rs/Unit"
-                  valueColumnKey="Price_12_Noon"
+                  valueColumnKey="Solar_Avg"
                   defaultCsvPath="/data/RTM Prices.csv"
                   enableAutoFetch={false}
                   calcMode="avg"
@@ -216,10 +216,10 @@ export default function App() {
                 <ElectricityDashboard
                   type="rtm-prices-night"
                   title="India RTM Prices Dashboard"
-                  subtitle="RTM 9 PM price trends, period averages, and YoY/WoW analytics"
-                  seriesLabel="RTM Prices (9 PM)"
+                  subtitle="RTM Non-Solar Hours (6pm–6am) avg price trends, period averages, and YoY/WoW analytics"
+                  seriesLabel="RTM Prices (Non-Solar Hours Avg)"
                   unitLabel="Rs/Unit"
-                  valueColumnKey="Price_9_PM"
+                  valueColumnKey="NonSolar_Avg"
                   defaultCsvPath="/data/RTM Prices.csv"
                   enableAutoFetch={false}
                   calcMode="avg"

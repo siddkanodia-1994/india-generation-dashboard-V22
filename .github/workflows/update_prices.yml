@@ -1,0 +1,56 @@
+name: Update Prices Data (RTM, DAM, Stocks)
+
+on:
+  schedule:
+    # 12:30am IST = 7:00pm UTC (IEX RTM & DAM data available by midnight IST)
+    - cron: "0 19 * * *"
+  workflow_dispatch:   # Allow manual trigger for testing
+
+jobs:
+  update-prices:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('scripts/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Install Playwright browsers (Chromium only)
+        run: playwright install chromium --with-deps
+
+      - name: Run prices scrapers (RTM + DAM + Stocks)
+        run: |
+          cd scripts
+          python run_all.py --mode prices
+
+      - name: Commit and push updated data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/data/
+          # Only commit if there are actual changes
+          if git diff --cached --quiet; then
+            echo "No data changes to commit."
+          else
+            git commit -m "auto: update prices data $(date -u +'%Y-%m-%d')"
+            git push
+          fi
