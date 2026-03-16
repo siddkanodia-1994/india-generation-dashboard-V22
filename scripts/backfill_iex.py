@@ -553,110 +553,131 @@ def _scrape_hourly_chunk_paginated(
     """
     from playwright.sync_api import sync_playwright
 
-    today  = date.today()
-    cutoff = today - timedelta(days=31)
-
-    if end < cutoff:
-        print(
-            f"[{label}] Hourly chunk {start}→{end}: "
-            f"older than 31 days (cutoff {cutoff}) — IEX won't serve this data. Skipping."
-        )
-        return {}
-
-    full_url = f"{url}?interval=HOURLY&dp=LAST_31_DAYS&showGraph=false"
     result: dict[date, tuple[float | None, float | None]] = {}
 
-    print(f"[{label}] Hourly chunk {start}→{end}: {full_url}")
+    # IEX does not support HOURLY+SELECT_RANGE (empty table).
+    # Try two URLs in order:
+    #   1. LAST_31_DAYS with toDate hint — may serve a historical 31-day window
+    #      if IEX honours the toDate param for this dp value.
+    #   2. LAST_31_DAYS without toDate — always works but only shows current 31 days,
+    #      so only useful when the chunk overlaps with today-31…today.
+    to_str   = end.strftime("%d-%m-%Y")
+    today    = date.today()
+    cutoff   = today - timedelta(days=32)
 
-    with sync_playwright() as pw:
-        browser, context = _make_browser_context(pw)
-        page = context.new_page()
-        try:
-            page.goto(full_url, wait_until="domcontentloaded", timeout=90000)
+    candidate_urls = [
+        # attempt 1 — historical window via toDate
+        f"{url}?interval=HOURLY&dp=LAST_31_DAYS&toDate={to_str}&showGraph=false",
+    ]
+    if end >= cutoff:
+        # also try the plain current-window URL for recent chunks
+        candidate_urls.append(
+            f"{url}?interval=HOURLY&dp=LAST_31_DAYS&showGraph=false"
+        )
+
+    full_url = candidate_urls[0]   # start with historical attempt
+    print(f"[{label}] Hourly chunk {start}→{end}: trying {full_url}")
+
+    def _collect_from_url(url_to_try: str) -> dict[date, tuple[float | None, float | None]]:
+        """Open one browser, paginate the hourly table, return {date:(solar,nonsolar)}."""
+        collected: dict[date, tuple[float | None, float | None]] = {}
+        with sync_playwright() as pw:
+            browser, context = _make_browser_context(pw)
+            page = context.new_page()
             try:
-                page.wait_for_load_state("networkidle", timeout=20000)
-            except Exception:
-                pass
-            try:
-                page.wait_for_selector("table tbody tr", timeout=20000)
-            except Exception:
-                pass
-            page.wait_for_timeout(1500)
+                page.goto(url_to_try, wait_until="domcontentloaded", timeout=90000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception:
+                    pass
+                try:
+                    page.wait_for_selector("table tbody tr", timeout=20000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(1500)
 
-            # Accumulate MCPs per date across all pages
-            solar_by_date:    defaultdict[date, list[float]] = defaultdict(list)
-            nonsolar_by_date: defaultdict[date, list[float]] = defaultdict(list)
-            page_num = 0
+                solar_by_date:    defaultdict[date, list[float]] = defaultdict(list)
+                nonsolar_by_date: defaultdict[date, list[float]] = defaultdict(list)
+                page_num = 0
 
-            while True:
-                page_num += 1
-                headers, data = _parse_main_table(page)
+                while True:
+                    page_num += 1
+                    headers, data = _parse_main_table(page)
 
-                date_col = _col_index(headers, "Date")
-                hour_col = next(
-                    (i for i, h in enumerate(headers) if h.strip().lower() == "hour"),
-                    None,
-                )
-                mcp_col = _col_index(headers, "MCP")
+                    date_col = _col_index(headers, "Date")
+                    hour_col = next(
+                        (i for i, h in enumerate(headers) if h.strip().lower() == "hour"),
+                        None,
+                    )
+                    mcp_col = _col_index(headers, "MCP")
 
-                if date_col is None or hour_col is None or mcp_col is None:
-                    print(f"[{label}] Hourly page {page_num}: missing cols {headers}")
-                    break
+                    if date_col is None or hour_col is None or mcp_col is None:
+                        print(f"[{label}] Hourly page {page_num}: missing cols {headers}")
+                        break
 
-                rows_this_page = 0
-                for row in data:
-                    if max(date_col, hour_col, mcp_col) >= len(row):
-                        continue
-                    d_str = row[date_col].strip()
-                    if not d_str:
-                        continue
-                    d = _parse_iex_date(d_str)
-                    if d is None or not (start <= d <= end):
-                        continue
-                    try:
-                        hour = int(row[hour_col].strip())
-                    except Exception:
-                        continue
-                    mcp = _parse_float(row[mcp_col])
-                    if mcp is None:
-                        continue
-                    mcp_unit = mcp / 1000
-                    if hour in SOLAR_HOURS:
-                        solar_by_date[d].append(mcp_unit)
-                    elif hour in NONSOLAR_HOURS:
-                        nonsolar_by_date[d].append(mcp_unit)
-                    rows_this_page += 1
+                    rows_this_page = 0
+                    for row in data:
+                        if max(date_col, hour_col, mcp_col) >= len(row):
+                            continue
+                        d_str = row[date_col].strip()
+                        if not d_str:
+                            continue
+                        d = _parse_iex_date(d_str)
+                        if d is None or not (start <= d <= end):
+                            continue
+                        try:
+                            hour = int(row[hour_col].strip())
+                        except Exception:
+                            continue
+                        mcp = _parse_float(row[mcp_col])
+                        if mcp is None:
+                            continue
+                        mcp_unit = mcp / 1000
+                        if hour in SOLAR_HOURS:
+                            solar_by_date[d].append(mcp_unit)
+                        elif hour in NONSOLAR_HOURS:
+                            nonsolar_by_date[d].append(mcp_unit)
+                        rows_this_page += 1
 
-                dates_seen = sorted(set(solar_by_date) | set(nonsolar_by_date))
-                print(
-                    f"[{label}] Hourly page {page_num}: {rows_this_page} rows, "
-                    f"{len(dates_seen)} dates so far "
-                    f"({dates_seen[0] if dates_seen else '?'} … "
-                    f"{dates_seen[-1] if dates_seen else '?'})"
-                )
+                    dates_seen = sorted(set(solar_by_date) | set(nonsolar_by_date))
+                    print(
+                        f"[{label}] Hourly page {page_num}: {rows_this_page} rows, "
+                        f"{len(dates_seen)} dates in range so far "
+                        f"({dates_seen[0] if dates_seen else '?'} … "
+                        f"{dates_seen[-1] if dates_seen else '?'})"
+                    )
 
-                if not _click_next_page(page, label):
-                    break  # No more pages (non-paginated or last page)
+                    if not _click_next_page(page, label):
+                        break
 
-            # Compute per-date averages from accumulated MCPs
-            all_dates = set(solar_by_date) | set(nonsolar_by_date)
-            for d in all_dates:
-                result[d] = (
-                    round(mean(solar_by_date[d]),    4) if solar_by_date[d]    else None,
-                    round(mean(nonsolar_by_date[d]), 4) if nonsolar_by_date[d] else None,
-                )
+                all_dates = set(solar_by_date) | set(nonsolar_by_date)
+                for d in all_dates:
+                    collected[d] = (
+                        round(mean(solar_by_date[d]),    4) if solar_by_date[d]    else None,
+                        round(mean(nonsolar_by_date[d]), 4) if nonsolar_by_date[d] else None,
+                    )
 
-        except Exception as e:
-            print(f"[{label}] _scrape_hourly_chunk_paginated exception: {e}")
-            try:
-                page.screenshot(
-                    path=f"/tmp/iex_{label.lower()}_hourly_err_{start}.png",
-                    full_page=True,
-                )
-            except Exception:
-                pass
-        finally:
-            browser.close()
+            except Exception as e:
+                print(f"[{label}] _collect_from_url exception ({url_to_try}): {e}")
+                try:
+                    page.screenshot(
+                        path=f"/tmp/iex_{label.lower()}_hourly_err_{start}.png",
+                        full_page=True,
+                    )
+                except Exception:
+                    pass
+            finally:
+                browser.close()
+        return collected
+
+    # Try each candidate URL; stop as soon as one returns in-range data
+    for attempt_url in candidate_urls:
+        print(f"[{label}] Hourly chunk {start}→{end}: trying {attempt_url}")
+        result = _collect_from_url(attempt_url)
+        if result:
+            print(f"[{label}] Got {len(result)} dates from {attempt_url}")
+            break
+        print(f"[{label}] No in-range data from {attempt_url} — trying next candidate")
 
     print(f"[{label}] Hourly chunk {start}→{end}: {len(result)} dates collected")
     return result
