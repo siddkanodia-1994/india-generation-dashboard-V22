@@ -220,6 +220,41 @@ def _parse_iex_date(s: str) -> date | None:
     return None
 
 
+def _click_next_page(page, label: str) -> bool:
+    """
+    Click the pagination '>' next-page button.
+    IEX uses Material-UI TablePagination — tries several aria-label variants.
+    Returns True if the button was found, enabled, and clicked.
+    """
+    try:
+        btn = page.locator(
+            "button[aria-label='Go to next page'], "
+            "button[aria-label='next page'], "
+            "button[title='Next page'], "
+            "button[title='Next']"
+        ).first
+        btn.wait_for(state="visible", timeout=3000)
+        if not btn.is_enabled():
+            print(f"[{label}] Next-page button disabled (last page reached)")
+            return False
+        btn.click()
+        page.wait_for_timeout(1500)
+        return True
+    except Exception as e:
+        print(f"[{label}] Next-page click failed: {e}")
+        return False
+
+
+def _page_date(data: list[list[str]], date_col: int) -> date | None:
+    """Return the date of the first non-empty date cell on the current page."""
+    for row in data:
+        if date_col < len(row) and row[date_col].strip():
+            d = _parse_iex_date(row[date_col].strip())
+            if d:
+                return d
+    return None
+
+
 # ── Fetch functions ───────────────────────────────────────────────────────────
 
 def fetch_daily_mcp(target_date: date) -> float | None:
@@ -296,10 +331,11 @@ def fetch_daily_mcp(target_date: date) -> float | None:
 
 def fetch_hourly_solar_nonsolar(target_date: date) -> tuple[float | None, float | None]:
     """
-    Navigate to IEX RTM URL with interval=HOURLY&dp=LAST_8_DAYS, filter rows
-    for target_date, return (solar_avg, nonsolar_avg) in Rs/Unit.
-    Solar  = hours 7-18 (6am-6pm IST)
-    NonSolar = hours 1-6 + 19-24
+    Navigate to IEX RTM URL with interval=HOURLY&dp=LAST_8_DAYS.
+    The table is PAGINATED — one day per page, page 1 = oldest (8 days ago),
+    page 8 = today.  Clicks '>' until the page showing target_date is found,
+    then computes solar (hrs 7-18, 6am-6pm IST) and nonsolar (hrs 1-6, 19-24)
+    averages from the 24 hourly MCP rows.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -325,48 +361,52 @@ def fetch_hourly_solar_nonsolar(target_date: date) -> tuple[float | None, float 
                 pass
             page.wait_for_timeout(1500)
 
-            headers, data = _parse_main_table(page)
-            print(f"[RTM] Hourly headers={headers}, total rows={len(data)}")
+            for page_num in range(8):  # Last 8 Days = max 8 pages
+                headers, data = _parse_main_table(page)
 
-            date_col = next((i for i, h in enumerate(headers) if "date" in h.lower()), None)
-            hour_col = _hour_col_index(headers)
-            mcp_col  = _mcp_col_index(headers)
-            if date_col is None or hour_col is None or mcp_col is None:
-                _debug_page(page, "hourly_no_cols")
-                return None, None
+                date_col = next((i for i, h in enumerate(headers) if "date" in h.lower()), None)
+                hour_col = _hour_col_index(headers)
+                mcp_col  = _mcp_col_index(headers)
+                if date_col is None or hour_col is None or mcp_col is None:
+                    print(f"[RTM] Hourly page {page_num+1}: missing cols {headers}")
+                    break
 
-            solar_mcps, nonsolar_mcps = [], []
-            current_date: date | None = None
-            for row in data:
-                if max(date_col, hour_col, mcp_col) >= len(row):
-                    continue
-                raw_date = row[date_col].strip()
-                if raw_date:
-                    parsed = _parse_iex_date(raw_date)
-                    if parsed:
-                        current_date = parsed
-                if current_date != target_date:
-                    continue
-                try:
-                    hour = int(row[hour_col].strip())
-                except Exception:
-                    continue
-                mcp = _parse_float(row[mcp_col])
-                if mcp is None:
-                    continue
-                mcp_unit = mcp / 1000
-                if hour in SOLAR_HOURS:
-                    solar_mcps.append(mcp_unit)
-                elif hour in NONSOLAR_HOURS:
-                    nonsolar_mcps.append(mcp_unit)
+                pg_date = _page_date(data, date_col)
+                print(f"[RTM] Hourly page {page_num+1}/8: date={pg_date}, rows={len(data)}")
 
-            solar_avg    = round(mean(solar_mcps),    4) if solar_mcps    else None
-            nonsolar_avg = round(mean(nonsolar_mcps), 4) if nonsolar_mcps else None
-            print(
-                f"[RTM] Solar={solar_avg} ({len(solar_mcps)} hrs), "
-                f"NonSolar={nonsolar_avg} ({len(nonsolar_mcps)} hrs)"
-            )
-            return solar_avg, nonsolar_avg
+                if pg_date == target_date:
+                    solar_mcps, nonsolar_mcps = [], []
+                    for row in data:
+                        if max(hour_col, mcp_col) >= len(row):
+                            continue
+                        try:
+                            hour = int(row[hour_col].strip())
+                        except Exception:
+                            continue
+                        mcp = _parse_float(row[mcp_col])
+                        if mcp is None:
+                            continue
+                        mcp_unit = mcp / 1000
+                        if hour in SOLAR_HOURS:
+                            solar_mcps.append(mcp_unit)
+                        elif hour in NONSOLAR_HOURS:
+                            nonsolar_mcps.append(mcp_unit)
+
+                    solar_avg    = round(mean(solar_mcps),    4) if solar_mcps    else None
+                    nonsolar_avg = round(mean(nonsolar_mcps), 4) if nonsolar_mcps else None
+                    print(
+                        f"[RTM] Solar={solar_avg} ({len(solar_mcps)} hrs), "
+                        f"NonSolar={nonsolar_avg} ({len(nonsolar_mcps)} hrs)"
+                    )
+                    return solar_avg, nonsolar_avg
+
+                # Not this page — go to next
+                if not _click_next_page(page, "RTM"):
+                    break
+
+            print(f"[RTM] WARNING: {target_date} not found in Last 8 Days hourly pages")
+            _debug_page(page, "hourly_not_found")
+            return None, None
         except Exception as e:
             print(f"[RTM] fetch_hourly exception: {e}")
             try:
