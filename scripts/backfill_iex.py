@@ -634,6 +634,44 @@ def _scrape_hourly_chunk_paginated(
                 pass
             page.wait_for_timeout(1500)
 
+            # 3b. Maximize rows-per-page in MUI TablePagination so all hourly rows
+            #     for each day are visible at once (default may be 1 or very low)
+            try:
+                rows_select = page.locator(
+                    ".MuiTablePagination-select, "
+                    "tfoot select, "
+                    "div[class*='TablePagination'] select, "
+                    "div[class*='tablePagination'] select"
+                ).first
+                if rows_select.is_visible(timeout=3000):
+                    options = rows_select.locator("option").all()
+                    opt_vals = [o.get_attribute("value") for o in options]
+                    print(f"[{label}] Rows-per-page options: {opt_vals}")
+                    best = None
+                    best_num = 0
+                    for v in opt_vals:
+                        try:
+                            n = int(v)
+                            if n > best_num:
+                                best_num = n
+                                best = v
+                        except Exception:
+                            if v and v.lower() in ("all", "-1"):
+                                best = v
+                                break
+                    if best:
+                        rows_select.select_option(best)
+                        page.wait_for_timeout(1500)
+                        print(f"[{label}] Set rows-per-page to {best}")
+                        page.screenshot(
+                            path=f"/tmp/iex_{label.lower()}_step3b_rowsperpage.png",
+                            full_page=True,
+                        )
+                else:
+                    print(f"[{label}] rows-per-page selector not visible")
+            except Exception as e:
+                print(f"[{label}] rows-per-page selector not found: {e}")
+
             # 4. Parse table — accumulate rows grouped by date
             #    Works for both paginated (one day/page) and non-paginated (all rows)
             solar_by_date:    defaultdict[date, list[float]] = defaultdict(list)
