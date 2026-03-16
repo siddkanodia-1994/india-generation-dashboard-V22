@@ -41,8 +41,8 @@ from config import CSV_PATHS
 IEX_RTM_URL = "https://www.iexindia.com/market-data/real-time-market/market-snapshot"
 IEX_DAM_URL = "https://www.iexindia.com/market-data/day-ahead-market/market-snapshot"
 
-SOLAR_HOURS    = set(range(7, 19))
-NONSOLAR_HOURS = set(range(1, 7)) | set(range(19, 25))
+SOLAR_HOURS    = set(range(6, 18))            # 0-indexed: Hours 6-17 = 06:00-18:00 IST
+NONSOLAR_HOURS = set(range(0, 6)) | set(range(18, 24))  # 0-indexed: Hours 0-5 + 18-23
 MAX_CHUNK_DAYS = 31
 
 
@@ -664,13 +664,17 @@ def _scrape_hourly_chunk_paginated(
                     break
 
                 rows_this_page = 0
+                current_date = None  # propagate date to rows with empty Date cell
                 for row in data:
                     if max(date_col, hour_col, mcp_col) >= len(row):
                         continue
                     d_str = row[date_col].strip()
-                    if not d_str:
-                        continue
-                    d = _parse_iex_date(d_str)
+                    if d_str:
+                        # Update current_date when the Date cell is filled (first row of each day)
+                        parsed = _parse_iex_date(d_str)
+                        if parsed is not None:
+                            current_date = parsed
+                    d = current_date  # use last-seen date for rows with empty Date cell
                     if d is None or not (start <= d <= end):
                         continue
                     try:
