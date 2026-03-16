@@ -66,5 +66,13 @@ jobs:
             echo "No data changes to commit."
           else
             git commit -m "auto: live prices $(date -u +'%Y-%m-%dT%H:%M')Z"
-            git push
+            for attempt in 1 2 3 4 5; do
+              if git push; then
+                echo "Push succeeded on attempt $attempt"
+                break
+              fi
+              echo "Push attempt $attempt failed — rebasing..."
+              git pull --rebase origin main
+              sleep $((attempt * 5))
+            done
           fi
