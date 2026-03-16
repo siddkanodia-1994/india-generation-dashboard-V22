@@ -7,12 +7,6 @@ Usage:
 
 Column written to DAM Prices.csv:
   Date, DAM price (daily avg MCP Rs/Unit)
-
-Strategy:
-  - Navigate to IEX DAM page
-  - Click "Daily" interval tab → select delivery period → parse HTML table → MCP ÷ 1000
-  - For "Yesterday": append row if not already present
-  - For "Today": upsert (overwrite today's row if exists, else append)
 """
 
 import argparse
@@ -63,7 +57,6 @@ def _last_data_date(rows: list[list[str]]) -> date | None:
 
 
 def _upsert_row(rows: list[list[str]], target_date: date, new_row: list) -> list[list[str]]:
-    """Replace existing row for target_date, or append if not found."""
     target_str = _format_date(target_date)
     for i, row in enumerate(rows):
         if row and row[0].strip() == target_str:
@@ -84,6 +77,8 @@ def _make_browser_context(pw):
             "--no-sandbox",
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--window-size=1280,800",
         ],
     )
     context = browser.new_context(
@@ -93,43 +88,80 @@ def _make_browser_context(pw):
         ),
         viewport={"width": 1280, "height": 800},
         locale="en-IN",
+        java_script_enabled=True,
     )
-    context.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-    )
+    context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'plugins',   {get: () => [1, 2, 3]});
+        Object.defineProperty(navigator, 'languages', {get: () => ['en-IN', 'en']});
+    """)
     return browser, context
 
 
-def _select_interval_and_period(page, interval: str, period: str) -> None:
-    """Click an interval tab then select the delivery period from the dropdown."""
-    tab_selector = (
-        f"button:has-text('{interval}'), "
-        f"[role='tab']:has-text('{interval}')"
-    )
-    page.wait_for_selector(tab_selector, timeout=30000)
-    page.locator(tab_selector).first.click()
-    page.wait_for_timeout(1500)
+def _debug_page(page, label: str) -> None:
+    try:
+        title = page.title()
+        print(f"[DAM] [{label}] title='{title}'")
+        body_text = page.inner_text("body")[:400].replace("\n", " ")
+        print(f"[DAM] [{label}] body_preview='{body_text}'")
+        shot = f"/tmp/iex_dam_{label}.png"
+        page.screenshot(path=shot, full_page=True)
+        print(f"[DAM] [{label}] screenshot: {shot}")
+    except Exception as e:
+        print(f"[DAM] [{label}] debug error: {e}")
 
-    combo = page.locator("[role='combobox']").first
-    combo.click()
-    page.wait_for_timeout(500)
-    page.locator(f"[role='option']:has-text('{period}')").first.click()
 
-    page.wait_for_load_state("networkidle", timeout=20000)
-    page.wait_for_timeout(2000)
+def _click_interval_tab(page, interval: str) -> bool:
+    selectors = [
+        f"button:has-text('{interval}')",
+        f"[role='tab']:has-text('{interval}')",
+        f".MuiTab-root:has-text('{interval}')",
+        f"a:has-text('{interval}')",
+        f"li:has-text('{interval}')",
+        f"span:has-text('{interval}')",
+    ]
+    for sel in selectors:
+        try:
+            page.wait_for_selector(sel, timeout=8000)
+            page.locator(sel).first.click()
+            print(f"[DAM] Clicked '{interval}' tab via: {sel}")
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _select_period(page, period: str) -> bool:
+    for combo_sel in ["[role='combobox']", "select", "[aria-haspopup='listbox']"]:
+        try:
+            combo = page.locator(combo_sel).first
+            combo.wait_for(timeout=5000)
+            combo.click()
+            page.wait_for_timeout(600)
+            for opt_sel in [
+                f"[role='option']:has-text('{period}')",
+                f"li:has-text('{period}')",
+                f"option:has-text('{period}')",
+            ]:
+                try:
+                    page.locator(opt_sel).first.click(timeout=5000)
+                    print(f"[DAM] Selected period '{period}' via: {opt_sel}")
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return False
 
 
 def _parse_table(page) -> tuple[list[str], list[list[str]]]:
-    """Return (headers, data_rows) from the rendered HTML table."""
     try:
         header_cells = page.locator("table thead th").all()
         if not header_cells:
             header_cells = page.locator("table tr:first-child th, table tr:first-child td").all()
         headers = [th.inner_text().strip() for th in header_cells]
-
-        body_rows = page.locator("table tbody tr").all()
         data = []
-        for tr in body_rows:
+        for tr in page.locator("table tbody tr").all():
             cells = [td.inner_text().strip() for td in tr.locator("td").all()]
             if cells:
                 data.append(cells)
@@ -154,10 +186,19 @@ def _parse_float(s: str) -> float | None:
         return None
 
 
-# ── Fetch function ────────────────────────────────────────────────────────────
+def _navigate_and_prepare(page, url: str) -> None:
+    page.goto(url, wait_until="domcontentloaded", timeout=90000)
+    try:
+        page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+    page.wait_for_timeout(5000)
+    _debug_page(page, "after_load")
+
+
+# ── Fetch ─────────────────────────────────────────────────────────────────────
 
 def fetch_dam_daily(period: str) -> float | None:
-    """Return daily avg DAM MCP in Rs/Unit (MCP Rs/MWh ÷ 1000)."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -169,28 +210,46 @@ def fetch_dam_daily(period: str) -> float | None:
         browser, context = _make_browser_context(pw)
         page = context.new_page()
         try:
-            page.goto(IEX_DAM_URL, wait_until="domcontentloaded", timeout=90000)
-            _select_interval_and_period(page, "Daily", period)
+            _navigate_and_prepare(page, IEX_DAM_URL)
+
+            if not _click_interval_tab(page, "Daily"):
+                _debug_page(page, "daily_tab_missing")
+                return None
+            page.wait_for_timeout(2000)
+
+            if not _select_period(page, period):
+                print(f"[DAM] WARNING: period '{period}' not selected, using page default")
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+
             headers, data = _parse_table(page)
-            print(f"[DAM] Daily: headers={headers}, rows={len(data)}")
+            print(f"[DAM] Daily headers={headers}, rows={len(data)}")
             mcp_col = _mcp_col_index(headers)
             if mcp_col is None:
-                print("[DAM] ERROR: MCP column not found in Daily table.")
+                _debug_page(page, "daily_no_mcp_col")
                 return None
-            mcps = []
-            for row in data:
-                if mcp_col < len(row):
-                    v = _parse_float(row[mcp_col])
-                    if v is not None:
-                        mcps.append(v)
+
+            mcps = [
+                _parse_float(row[mcp_col])
+                for row in data
+                if mcp_col < len(row) and _parse_float(row[mcp_col]) is not None
+            ]
             if not mcps:
-                print("[DAM] No valid MCP values in Daily table.")
+                _debug_page(page, "daily_no_mcp_values")
                 return None
+
             avg = round(mean(mcps) / 1000, 4)
             print(f"[DAM] Daily avg MCP: {avg} Rs/Unit (n={len(mcps)})")
             return avg
         except Exception as e:
             print(f"[DAM] Daily fetch exception: {e}")
+            try:
+                _debug_page(page, "daily_exception")
+            except Exception:
+                pass
         finally:
             browser.close()
     return None
@@ -199,10 +258,6 @@ def fetch_dam_daily(period: str) -> float | None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def scrape_dam(target_date: date, period_label: str) -> bool:
-    """
-    period_label: "Yesterday" → append (skip if already present)
-                  "Today"     → upsert (overwrite today's row each hour)
-    """
     csv_path = CSV_PATHS["dam"]
     rows = _read_csv(csv_path)
 
@@ -221,7 +276,7 @@ def scrape_dam(target_date: date, period_label: str) -> bool:
         return False
 
     new_row = [_format_date(target_date), dam_price, "", ""]
-    print(f"[DAM] Row to write: {new_row}")
+    print(f"[DAM] Writing row: {new_row}")
 
     if period_label.lower() == "today":
         rows = _upsert_row(rows, target_date, new_row)
@@ -240,7 +295,7 @@ if __name__ == "__main__":
         "--period",
         choices=["yesterday", "today"],
         default="yesterday",
-        help="Delivery period: 'yesterday' (nightly, default) or 'today' (hourly live)",
+        help="'yesterday' (nightly) or 'today' (hourly live)",
     )
     args = parser.parse_args()
 

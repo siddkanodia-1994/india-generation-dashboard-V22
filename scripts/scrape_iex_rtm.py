@@ -9,14 +9,10 @@ Columns written to RTM Prices.csv:
   Date, RTM price (daily avg MCP Rs/Unit), Solar_Avg, NonSolar_Avg
 
 Strategy:
-  - Navigate to IEX RTM page
-  - Click "Daily" interval tab → select delivery period → parse HTML table → daily MCP ÷ 1000
-  - Click "Hourly" interval tab → select delivery period → parse Hour + MCP columns
-    Solar avg  = hours 7–18  (6am–6pm IST)
-    NonSolar avg = hours 1–6 + 19–24 (6pm–6am IST)
-  - For "Today": only average hours with data (partial day OK)
-  - For "Yesterday": append row if not already present
-  - For "Today": upsert (overwrite today's row if exists, else append)
+  - Navigate to IEX RTM page (wait for networkidle + extra time for React hydration)
+  - Click "Daily" interval tab → select delivery period → parse HTML table → MCP ÷ 1000
+  - Click "Hourly" interval tab → same → Solar avg hours 7-18, NonSolar hours 1-6+19-24
+  - For "Today": upsert today's row; for "Yesterday": append if not present
 """
 
 import argparse
@@ -31,9 +27,8 @@ from config import CSV_PATHS
 
 IEX_RTM_URL = "https://www.iexindia.com/market-data/real-time-market/market-snapshot"
 
-# IEX "Hourly" tab: Hour column is 1-indexed (Hour 1 = 00:00–01:00 IST)
-SOLAR_HOURS    = set(range(7, 19))           # Hour 7–18 → 06:00–18:00 IST
-NONSOLAR_HOURS = set(range(1, 7)) | set(range(19, 25))  # 1–6 + 19–24
+SOLAR_HOURS    = set(range(7, 19))
+NONSOLAR_HOURS = set(range(1, 7)) | set(range(19, 25))
 
 
 # ── CSV helpers ───────────────────────────────────────────────────────────────
@@ -71,7 +66,6 @@ def _last_data_date(rows: list[list[str]]) -> date | None:
 
 
 def _upsert_row(rows: list[list[str]], target_date: date, new_row: list) -> list[list[str]]:
-    """Replace existing row for target_date, or append if not found."""
     target_str = _format_date(target_date)
     for i, row in enumerate(rows):
         if row and row[0].strip() == target_str:
@@ -92,6 +86,8 @@ def _make_browser_context(pw):
             "--no-sandbox",
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--window-size=1280,800",
         ],
     )
     context = browser.new_context(
@@ -101,44 +97,83 @@ def _make_browser_context(pw):
         ),
         viewport={"width": 1280, "height": 800},
         locale="en-IN",
+        java_script_enabled=True,
     )
-    context.add_init_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
-    )
+    context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'plugins',   {get: () => [1, 2, 3]});
+        Object.defineProperty(navigator, 'languages', {get: () => ['en-IN', 'en']});
+    """)
     return browser, context
 
 
-def _select_interval_and_period(page, interval: str, period: str) -> None:
-    """Click an interval tab (e.g. 'Daily', 'Hourly') then pick a delivery period."""
-    tab_selector = (
-        f"button:has-text('{interval}'), "
-        f"[role='tab']:has-text('{interval}')"
-    )
-    page.wait_for_selector(tab_selector, timeout=30000)
-    page.locator(tab_selector).first.click()
-    page.wait_for_timeout(1500)
+def _debug_page(page, label: str) -> None:
+    try:
+        title = page.title()
+        print(f"[RTM] [{label}] title='{title}'")
+        # Print visible text snippet for Cloudflare challenge detection
+        body_text = page.inner_text("body")[:400].replace("\n", " ")
+        print(f"[RTM] [{label}] body_preview='{body_text}'")
+        shot = f"/tmp/iex_rtm_{label}.png"
+        page.screenshot(path=shot, full_page=True)
+        print(f"[RTM] [{label}] screenshot: {shot}")
+    except Exception as e:
+        print(f"[RTM] [{label}] debug error: {e}")
 
-    # Material-UI Select — click the combobox, then pick the matching option
-    combo = page.locator("[role='combobox']").first
-    combo.click()
-    page.wait_for_timeout(500)
-    page.locator(f"[role='option']:has-text('{period}')").first.click()
 
-    page.wait_for_load_state("networkidle", timeout=20000)
-    page.wait_for_timeout(2000)
+def _click_interval_tab(page, interval: str) -> bool:
+    """Try several selector strategies to click the interval tab."""
+    selectors = [
+        f"button:has-text('{interval}')",
+        f"[role='tab']:has-text('{interval}')",
+        f".MuiTab-root:has-text('{interval}')",
+        f"a:has-text('{interval}')",
+        f"li:has-text('{interval}')",
+        f"span:has-text('{interval}')",
+    ]
+    for sel in selectors:
+        try:
+            page.wait_for_selector(sel, timeout=8000)
+            page.locator(sel).first.click()
+            print(f"[RTM] Clicked '{interval}' tab via: {sel}")
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _select_period(page, period: str) -> bool:
+    """Try to pick the delivery period from the dropdown."""
+    for combo_sel in ["[role='combobox']", "select", "[aria-haspopup='listbox']"]:
+        try:
+            combo = page.locator(combo_sel).first
+            combo.wait_for(timeout=5000)
+            combo.click()
+            page.wait_for_timeout(600)
+            for opt_sel in [
+                f"[role='option']:has-text('{period}')",
+                f"li:has-text('{period}')",
+                f"option:has-text('{period}')",
+            ]:
+                try:
+                    page.locator(opt_sel).first.click(timeout=5000)
+                    print(f"[RTM] Selected period '{period}' via: {opt_sel}")
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return False
 
 
 def _parse_table(page) -> tuple[list[str], list[list[str]]]:
-    """Return (headers, data_rows) from the rendered HTML table."""
     try:
         header_cells = page.locator("table thead th").all()
         if not header_cells:
             header_cells = page.locator("table tr:first-child th, table tr:first-child td").all()
         headers = [th.inner_text().strip() for th in header_cells]
-
-        body_rows = page.locator("table tbody tr").all()
         data = []
-        for tr in body_rows:
+        for tr in page.locator("table tbody tr").all():
             cells = [td.inner_text().strip() for td in tr.locator("td").all()]
             if cells:
                 data.append(cells)
@@ -170,10 +205,22 @@ def _parse_float(s: str) -> float | None:
         return None
 
 
+def _navigate_and_prepare(page, url: str) -> None:
+    """Load page and wait for React to fully hydrate."""
+    page.goto(url, wait_until="domcontentloaded", timeout=90000)
+    # Wait for network to settle after React hydration
+    try:
+        page.wait_for_load_state("networkidle", timeout=20000)
+    except Exception:
+        pass
+    # Extra buffer for client-side rendering
+    page.wait_for_timeout(5000)
+    _debug_page(page, "after_load")
+
+
 # ── Fetch functions ───────────────────────────────────────────────────────────
 
 def fetch_daily_mcp(period: str) -> float | None:
-    """Return daily avg MCP in Rs/Unit (MCP Rs/MWh ÷ 1000)."""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -185,38 +232,52 @@ def fetch_daily_mcp(period: str) -> float | None:
         browser, context = _make_browser_context(pw)
         page = context.new_page()
         try:
-            page.goto(IEX_RTM_URL, wait_until="domcontentloaded", timeout=90000)
-            _select_interval_and_period(page, "Daily", period)
+            _navigate_and_prepare(page, IEX_RTM_URL)
+
+            if not _click_interval_tab(page, "Daily"):
+                _debug_page(page, "daily_tab_missing")
+                return None
+            page.wait_for_timeout(2000)
+
+            if not _select_period(page, period):
+                print(f"[RTM] WARNING: period '{period}' not selected, using page default")
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+
             headers, data = _parse_table(page)
-            print(f"[RTM] Daily: headers={headers}, rows={len(data)}")
+            print(f"[RTM] Daily headers={headers}, rows={len(data)}")
             mcp_col = _mcp_col_index(headers)
             if mcp_col is None:
-                print("[RTM] ERROR: MCP column not found in Daily table.")
+                _debug_page(page, "daily_no_mcp_col")
                 return None
-            mcps = []
-            for row in data:
-                if mcp_col < len(row):
-                    v = _parse_float(row[mcp_col])
-                    if v is not None:
-                        mcps.append(v)
+
+            mcps = [
+                _parse_float(row[mcp_col])
+                for row in data
+                if mcp_col < len(row) and _parse_float(row[mcp_col]) is not None
+            ]
             if not mcps:
-                print("[RTM] No valid MCP values in Daily table.")
+                _debug_page(page, "daily_no_mcp_values")
                 return None
+
             avg = round(mean(mcps) / 1000, 4)
             print(f"[RTM] Daily avg MCP: {avg} Rs/Unit (n={len(mcps)})")
             return avg
         except Exception as e:
             print(f"[RTM] Daily fetch exception: {e}")
+            try:
+                _debug_page(page, "daily_exception")
+            except Exception:
+                pass
         finally:
             browser.close()
     return None
 
 
 def fetch_hourly_solar_nonsolar(period: str) -> tuple[float | None, float | None]:
-    """
-    Fetch Hourly tab data and return (solar_avg, nonsolar_avg) in Rs/Unit.
-    For 'Today', only includes hours that have data (MCP > 0).
-    """
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -228,18 +289,30 @@ def fetch_hourly_solar_nonsolar(period: str) -> tuple[float | None, float | None
         browser, context = _make_browser_context(pw)
         page = context.new_page()
         try:
-            page.goto(IEX_RTM_URL, wait_until="domcontentloaded", timeout=90000)
-            _select_interval_and_period(page, "Hourly", period)
+            _navigate_and_prepare(page, IEX_RTM_URL)
+
+            if not _click_interval_tab(page, "Hourly"):
+                _debug_page(page, "hourly_tab_missing")
+                return None, None
+            page.wait_for_timeout(2000)
+
+            if not _select_period(page, period):
+                print(f"[RTM] WARNING: period '{period}' not selected, using page default")
+            try:
+                page.wait_for_load_state("networkidle", timeout=10000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+
             headers, data = _parse_table(page)
-            print(f"[RTM] Hourly: headers={headers}, rows={len(data)}")
+            print(f"[RTM] Hourly headers={headers}, rows={len(data)}")
             hour_col = _hour_col_index(headers)
             mcp_col  = _mcp_col_index(headers)
             if hour_col is None or mcp_col is None:
-                print(f"[RTM] ERROR: Hour col={hour_col}, MCP col={mcp_col}")
+                _debug_page(page, "hourly_no_cols")
                 return None, None
 
-            solar_mcps    = []
-            nonsolar_mcps = []
+            solar_mcps, nonsolar_mcps = [], []
             for row in data:
                 if max(hour_col, mcp_col) >= len(row):
                     continue
@@ -259,12 +332,16 @@ def fetch_hourly_solar_nonsolar(period: str) -> tuple[float | None, float | None
             solar_avg    = round(mean(solar_mcps),    4) if solar_mcps    else None
             nonsolar_avg = round(mean(nonsolar_mcps), 4) if nonsolar_mcps else None
             print(
-                f"[RTM] Solar avg={solar_avg} ({len(solar_mcps)} hrs), "
-                f"NonSolar avg={nonsolar_avg} ({len(nonsolar_mcps)} hrs)"
+                f"[RTM] Solar={solar_avg} ({len(solar_mcps)} hrs), "
+                f"NonSolar={nonsolar_avg} ({len(nonsolar_mcps)} hrs)"
             )
             return solar_avg, nonsolar_avg
         except Exception as e:
             print(f"[RTM] Hourly fetch exception: {e}")
+            try:
+                _debug_page(page, "hourly_exception")
+            except Exception:
+                pass
         finally:
             browser.close()
     return None, None
@@ -273,10 +350,6 @@ def fetch_hourly_solar_nonsolar(period: str) -> tuple[float | None, float | None
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def scrape_rtm(target_date: date, period_label: str) -> bool:
-    """
-    period_label: "Yesterday" → append (skip if already present)
-                  "Today"     → upsert (overwrite today's row each hour)
-    """
     csv_path = CSV_PATHS["rtm"]
     rows = _read_csv(csv_path)
 
@@ -295,16 +368,15 @@ def scrape_rtm(target_date: date, period_label: str) -> bool:
         print(f"[RTM] ERROR: Could not get daily MCP for {target_date}.")
         return False
 
-    # Fall back to daily_avg when hourly is unavailable
     if solar_avg is None:
-        print("[RTM] WARNING: Solar avg unavailable; using daily avg as fallback.")
+        print("[RTM] WARNING: Solar avg unavailable; using daily avg.")
         solar_avg = daily_avg
     if nonsolar_avg is None:
-        print("[RTM] WARNING: NonSolar avg unavailable; using daily avg as fallback.")
+        print("[RTM] WARNING: NonSolar avg unavailable; using daily avg.")
         nonsolar_avg = daily_avg
 
     new_row = [_format_date(target_date), daily_avg, solar_avg, nonsolar_avg]
-    print(f"[RTM] Row to write: {new_row}")
+    print(f"[RTM] Writing row: {new_row}")
 
     if period_label.lower() == "today":
         rows = _upsert_row(rows, target_date, new_row)
@@ -323,16 +395,16 @@ if __name__ == "__main__":
         "--period",
         choices=["yesterday", "today"],
         default="yesterday",
-        help="Delivery period: 'yesterday' (nightly, default) or 'today' (hourly live)",
+        help="'yesterday' (nightly) or 'today' (hourly live)",
     )
     args = parser.parse_args()
 
     if args.period == "yesterday":
-        target   = date.today() - timedelta(days=1)
-        p_label  = "Yesterday"
+        target  = date.today() - timedelta(days=1)
+        p_label = "Yesterday"
     else:
-        target   = date.today()
-        p_label  = "Today"
+        target  = date.today()
+        p_label = "Today"
 
     success = scrape_rtm(target, p_label)
     sys.exit(0 if success else 1)

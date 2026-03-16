@@ -49,6 +49,14 @@ jobs:
           python scrape_iex_dam.py --period today
         continue-on-error: true   # Don't block if IEX is temporarily unavailable
 
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iex-debug-screenshots
+          path: /tmp/iex_*.png
+          if-no-files-found: ignore
+
       - name: Commit and push live data
         run: |
           git config user.name  "github-actions[bot]"
