@@ -387,62 +387,63 @@ def _col_index(headers: list[str], keyword: str) -> int | None:
 
 
 # ── Core scrape: one chunk ────────────────────────────────────────────────────
+#
+# Instead of UI interaction (clicking dropdowns, filling date inputs), we
+# navigate directly to the URL with query parameters.  Next.js SSR renders
+# the table populated with the requested data — no dropdowns, no date pickers,
+# no Update Report button.  Confirmed param names from browser DevTools:
+#
+#   interval=DAILY | HOURLY
+#   dp=SELECT_RANGE | LAST_31_DAYS | LAST_8_DAYS
+#   fromDate=DD-MM-YYYY   (only when dp=SELECT_RANGE)
+#   toDate=DD-MM-YYYY
+#   showGraph=false
+
+def _chunk_url(base_url: str, interval: str, start: date, end: date) -> str:
+    from_str = start.strftime("%d-%m-%Y")
+    to_str   = end.strftime("%d-%m-%Y")
+    return (
+        f"{base_url}?interval={interval}&dp=SELECT_RANGE"
+        f"&fromDate={from_str}&toDate={to_str}&showGraph=false"
+    )
+
 
 def _scrape_daily_chunk(
-    url: str, interval: str, start: date, end: date,
-    label: str, use_custom: bool
-) -> tuple[list[str], list[list[str]], bool]:
+    url: str, interval: str, start: date, end: date, label: str
+) -> tuple[list[str], list[list[str]]]:
     """
-    Navigate to url, set interval, set date range, return (headers, rows, custom_succeeded).
-    use_custom=True  → select Custom delivery period + fill date inputs
-    use_custom=False → select "Last 31 Days" from dropdown
-    custom_succeeded=True means date filter should apply; False means accept all returned dates.
+    Navigate directly to URL with interval/date query params.
+    Returns (headers, rows).  No UI interaction — URL drives the page state.
     """
     from playwright.sync_api import sync_playwright
+
+    full_url = _chunk_url(url, interval, start, end)
+    print(f"[{label}] Fetching: {full_url}")
 
     with sync_playwright() as pw:
         browser, context = _make_browser_context(pw)
         page = context.new_page()
         try:
-            _navigate(page, url, label)
-
-            # Set interval (combobox[0])
-            if not _click_dropdown_and_select(page, 0, interval, label):
-                print(f"[{label}] Could not select interval '{interval}'")
-                return [], [], False
-            _wait_for_table(page)
-            page.screenshot(path=f"/tmp/iex_{label.lower()}_{start}_interval.png")
-
-            # Set delivery period
-            custom_ok = False
-            if use_custom:
-                custom_ok = _set_custom_date_range(page, start, end, label)
-
-            if not custom_ok:
-                print(f"[{label}] Falling back to Last 31 Days")
-                try:
-                    combos2 = page.locator("[role='combobox']").all()
-                    if len(combos2) >= 2:
-                        combos2[1].click()
-                        page.wait_for_timeout(800)
-                        opt31 = page.locator("[role='option']:has-text('Last 31 Days')").first
-                        opt31.wait_for(state="visible", timeout=5000)
-                        opt31.click()
-                        print(f"[{label}] Fallback: selected Last 31 Days")
-                        page.wait_for_timeout(500)
-                except Exception as fe:
-                    print(f"[{label}] Fallback also failed: {fe}")
-
-            _wait_for_table(page)
+            page.goto(full_url, wait_until="domcontentloaded", timeout=90000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception:
+                pass
+            # Wait for table rows to render
+            try:
+                page.wait_for_selector("table tbody tr", timeout=20000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
 
             headers, data = _parse_main_table(page)
-            print(f"[{label}] {interval} {start}→{end}: headers={headers}, rows={len(data)}, custom_ok={custom_ok}")
+            print(f"[{label}] {interval} {start}→{end}: headers={headers}, rows={len(data)}")
 
-            if not headers:
+            if not headers or not data:
                 page.screenshot(
                     path=f"/tmp/iex_{label.lower()}_backfill_{start}.png", full_page=True
                 )
-            return headers, data, custom_ok
+            return headers, data
 
         except Exception as e:
             print(f"[{label}] _scrape_daily_chunk exception: {e}")
@@ -452,7 +453,7 @@ def _scrape_daily_chunk(
                 )
             except Exception:
                 pass
-            return [], [], False
+            return [], []
         finally:
             browser.close()
 
@@ -471,8 +472,8 @@ def scrape_daily_range(
     result: dict[date, float] = {}
 
     for chunk_start, chunk_end in chunks:
-        headers, data, custom_ok = _scrape_daily_chunk(
-            url, "Daily", chunk_start, chunk_end, label, use_custom=True
+        headers, data = _scrape_daily_chunk(
+            url, "DAILY", chunk_start, chunk_end, label
         )
         if not headers or not data:
             print(f"[{label}] No data for chunk {chunk_start}→{chunk_end}")
@@ -493,10 +494,7 @@ def scrape_daily_range(
             mcp = _parse_float(row[mcp_col])
             if d is None or mcp is None:
                 continue
-            # When custom succeeded, restrict to the requested chunk range.
-            # When falling back to Last 31 Days, accept all returned dates
-            # and let _merge_rows (existing-wins) handle deduplication.
-            if custom_ok and not (chunk_start <= d <= chunk_end):
+            if not (chunk_start <= d <= chunk_end):
                 continue
             mcps_by_date[d].append(mcp / 1000)
 
@@ -521,8 +519,8 @@ def scrape_hourly_range(
     result: dict[date, tuple[float | None, float | None]] = {}
 
     for chunk_start, chunk_end in chunks:
-        headers, data, custom_ok = _scrape_daily_chunk(
-            url, "Hourly", chunk_start, chunk_end, label, use_custom=True
+        headers, data = _scrape_daily_chunk(
+            url, "HOURLY", chunk_start, chunk_end, label
         )
         if not headers or not data:
             continue
@@ -550,8 +548,7 @@ def scrape_hourly_range(
                     current_date = d
             if current_date is None:
                 continue
-            # Same logic: apply date filter only when custom succeeded
-            if custom_ok and not (chunk_start <= current_date <= chunk_end):
+            if not (chunk_start <= current_date <= chunk_end):
                 continue
             try:
                 hour = int(row[hour_col].strip())
