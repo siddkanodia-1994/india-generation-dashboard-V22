@@ -265,6 +265,7 @@ export default function App() {
                 suffix: " Rs/Unit",
                 decimals: 2,
               }}
+              extraBadgeCols={[]}
             />
           </TabPanel>
 

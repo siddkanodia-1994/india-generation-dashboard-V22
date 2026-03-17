@@ -1468,7 +1468,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
             <div className="mt-1 text-sm text-slate-600">{subtitle}</div>
           </div>
 
-          {extraBadgeCols?.length ? (
+          {extraBadgeCols !== undefined ? (
             <div className="flex flex-wrap items-center gap-2">
               {kpis.latest && (
                 <div className="rounded-xl bg-white px-4 py-2 ring-1 ring-slate-200 text-center">
