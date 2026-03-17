@@ -35,14 +35,24 @@ def _format_date(d: date) -> str:
     return d.strftime("%d/%m/%y")
 
 
-def _last_date_in_sheet(ws) -> date | None:
-    """Return last date in column A of an openpyxl worksheet, or None."""
+def _last_date_in_sheet(ws, check_data_col: int | None = None) -> date | None:
+    """Return last date in column A where data column is also filled, or None.
+
+    check_data_col: 1-based column index that must be non-empty for the row to count.
+    Use this to skip pre-populated date rows that have no actual data.
+    """
     import datetime as dt
+    n_cols = max(1, check_data_col) if check_data_col else 1
     last = None
-    for row in ws.iter_rows(min_row=2, max_col=1, values_only=True):
+    for row in ws.iter_rows(min_row=2, max_col=n_cols, values_only=True):
         val = row[0]
         if val is None:
             continue
+        # Skip rows where the data column is empty
+        if check_data_col is not None:
+            data_val = row[check_data_col - 1] if len(row) >= check_data_col else None
+            if data_val in (None, ""):
+                continue
         if isinstance(val, dt.datetime):
             last = val.date()
         elif isinstance(val, dt.date):
@@ -165,6 +175,30 @@ def _scrape_screener(ticker: str) -> dict | None:
     return {"price": price, "pb": pb}
 
 
+def _scrape_nse_price(ticker: str) -> float | None:
+    """Fetch current price from NSE public API as fallback when Screener.in fails."""
+    import urllib.request
+    import json as _json
+    url = f"https://www.nseindia.com/api/quote-equity?symbol={ticker}"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json",
+        "Referer": "https://www.nseindia.com/",
+    }
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+        price = data.get("priceInfo", {}).get("lastPrice")
+        return float(price) if price is not None else None
+    except Exception as e:
+        print(f"[STOCKS] NSE fallback failed for {ticker}: {e}")
+        return None
+
+
 # ── XLSX update ───────────────────────────────────────────────────────────────
 
 def _update_xlsx(results: dict[str, dict | None], target_date: date) -> bool:
@@ -199,8 +233,9 @@ def _update_xlsx(results: dict[str, dict | None], target_date: date) -> bool:
     if pb_ws.max_row == 0 or pb_ws.cell(1, 1).value is None:
         pb_ws.cell(1, 1, "Date")
 
-    # Idempotency check
-    last_price_date = _last_date_in_sheet(prices_ws)
+    # Idempotency check — use check_data_col=2 so pre-populated date rows with no
+    # actual ticker data don't falsely trigger the skip
+    last_price_date = _last_date_in_sheet(prices_ws, check_data_col=2)
     if last_price_date and last_price_date >= target_date:
         print(f"[STOCKS] Data for {target_date} already in Prices sheet. Skipping.")
         return True
@@ -241,7 +276,14 @@ def scrape_stocks(target_date: date | None = None) -> bool:
     for ticker in STOCK_TICKERS:
         print(f"[STOCKS] Fetching {ticker}...")
         data = _scrape_screener(ticker)
-        results[ticker] = data
+        # NSE fallback: if Screener.in returned no price, try NSE public API
+        if data is None or data.get("price") is None:
+            print(f"[STOCKS] {ticker}: Screener price unavailable, trying NSE fallback...")
+            nse_price = _scrape_nse_price(ticker)
+            if nse_price is not None:
+                data = data or {}
+                data["price"] = nse_price
+        results[ticker] = data if data else None
         if data:
             print(f"[STOCKS] {ticker}: price={data.get('price')}, P/B={data.get('pb')}")
         time.sleep(2)  # Be polite to Screener.in
