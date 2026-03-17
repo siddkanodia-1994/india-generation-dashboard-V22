@@ -12,7 +12,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="mx-auto max-w-7xl px-4 pt-4">
-        <Tabs>
+        <Tabs defaultIndex={4}>
           <div className="mt-2">
             <TabList>
               <Tab>Generation</Tab>
@@ -189,6 +189,10 @@ export default function App() {
                     suffix: " Rs/Unit",
                     decimals: 2,
                   }}
+                  extraBadgeCols={[
+                    { key: "Solar_Avg",    label: "☀ Solar · Rs/Unit" },
+                    { key: "NonSolar_Avg", label: "◑ Non-Solar · Rs/Unit" },
+                  ]}
                 />
               </TabPanel>
 

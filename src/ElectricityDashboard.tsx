@@ -627,6 +627,7 @@ export type ElectricityDashboardProps = {
   enableAutoFetch?: boolean;
   calcMode: "sum" | "avg";
   valueDisplay: { suffix: string; decimals: number };
+  extraBadgeCols?: { key: string; label: string }[];
 };
 
 // explicit view types
@@ -651,6 +652,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     enableAutoFetch = false,
     calcMode,
     valueDisplay,
+    extraBadgeCols,
   } = props;
 
   const STORAGE_KEY = `tusk_india_${type}_v1`;
@@ -709,6 +711,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   const [rangeDays, setRangeDays] = useState(730);
 
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
+  const [extraLatestValues, setExtraLatestValues] = useState<Map<string, number>>(new Map());
 
   const [fromIso, setFromIso] = useState("");
   const [toIso, setToIso] = useState("");
@@ -821,6 +824,18 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
         for (const r of parsed) m.set(r.date, r.value);
 
         setDataMap(m);
+
+        // Parse extra badge columns (e.g. Solar_Avg, NonSolar_Avg) from the same CSV
+        if (extraBadgeCols?.length) {
+          const extra = new Map<string, number>();
+          for (const { key } of extraBadgeCols) {
+            const { parsed: ep } = csvParse(text, key);
+            if (ep.length) {
+              extra.set(key, ep[ep.length - 1].value);
+            }
+          }
+          if (!cancelled) setExtraLatestValues(extra);
+        }
 
         if (errs.length) {
           setFetchStatus(`Loaded (${parsed.length} rows) with ${errs.length} issues.`);
@@ -1452,6 +1467,31 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
             <div className="text-2xl font-semibold text-slate-900">{title}</div>
             <div className="mt-1 text-sm text-slate-600">{subtitle}</div>
           </div>
+
+          {extraBadgeCols?.length ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {kpis.latest && (
+                <div className="rounded-xl bg-white px-4 py-2 ring-1 ring-slate-200 text-center">
+                  <div className="text-lg font-bold text-slate-900">{fmtValue(kpis.latest.value)}</div>
+                  <div className="text-xs text-slate-500">Avg · Rs/Unit</div>
+                </div>
+              )}
+              {extraBadgeCols.map(({ key, label }) => {
+                const v = extraLatestValues.get(key);
+                return (
+                  <div key={key} className="rounded-xl bg-white px-4 py-2 ring-1 ring-slate-200 text-center">
+                    <div className="text-lg font-bold text-slate-900">{v != null ? fmtValue(v) : "—"}</div>
+                    <div className="text-xs text-slate-500">{label}</div>
+                  </div>
+                );
+              })}
+              {kpis.latest && (
+                <div className="text-xs text-slate-400 self-end pb-1">
+                  {formatDDMMYYYY(kpis.latest.date)}
+                </div>
+              )}
+            </div>
+          ) : null}
 
           <div className="flex flex-wrap gap-2">
             <button
