@@ -235,32 +235,42 @@ def _update_xlsx(results, target_date):
 
     # Headers already exist in "Stock Prices" and "Stock P-B"
 
-    # Idempotency check — use check_data_col=2 so pre-populated date rows with no
-    # actual ticker data don't falsely trigger the skip
+    # Independent idempotency checks — so a missed P/B write is retried even
+    # when prices are already present (and vice-versa).
     last_price_date = _last_date_in_sheet(prices_ws, check_data_col=2)
-    if last_price_date and last_price_date >= target_date:
-        print(f"[STOCKS] Data for {target_date} already in Prices sheet. Skipping.")
+    skip_prices = bool(last_price_date and last_price_date >= target_date)
+
+    last_pb_date = _last_date_in_sheet(pb_ws, check_data_col=2)
+    skip_pb = bool(last_pb_date and last_pb_date >= target_date)
+
+    if skip_prices and skip_pb:
+        print(f"[STOCKS] Data for {target_date} already in both sheets. Skipping.")
         return True
+    if skip_prices:
+        print(f"[STOCKS] Prices for {target_date} already present. Writing P/B only.")
+    if skip_pb:
+        print(f"[STOCKS] P/B for {target_date} already present. Writing prices only.")
 
     date_str = _format_date(target_date)
 
-    # New rows
     price_new_row = prices_ws.max_row + 1
     pb_new_row    = pb_ws.max_row + 1
 
-    prices_ws.cell(price_new_row, 1, date_str)
-    pb_ws.cell(pb_new_row, 1, date_str)
+    if not skip_prices:
+        prices_ws.cell(price_new_row, 1, date_str)
+    if not skip_pb:
+        pb_ws.cell(pb_new_row, 1, date_str)
 
     for ticker, data in results.items():
         if data is None:
             continue
         col_name  = TICKER_COLUMN_NAMES.get(ticker, ticker)
-        price_col = _ensure_ticker_column(prices_ws, col_name)
-        pb_col    = _ensure_ticker_column(pb_ws, col_name)
 
-        if data.get("price") is not None:
+        if not skip_prices and data.get("price") is not None:
+            price_col = _ensure_ticker_column(prices_ws, col_name)
             prices_ws.cell(price_new_row, price_col, data["price"])
-        if data.get("pb") is not None:
+        if not skip_pb and data.get("pb") is not None:
+            pb_col = _ensure_ticker_column(pb_ws, col_name)
             pb_ws.cell(pb_new_row, pb_col, data["pb"])
 
     wb.save(xlsx_path)
