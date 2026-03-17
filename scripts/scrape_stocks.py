@@ -35,7 +35,7 @@ def _format_date(d: date) -> str:
     return d.strftime("%d/%m/%y")
 
 
-def _last_date_in_sheet(ws, check_data_col: int | None = None) -> date | None:
+def _last_date_in_sheet(ws, check_data_col=None):
     """Return last date in column A where data column is also filled, or None.
 
     check_data_col: 1-based column index that must be non-empty for the row to count.
@@ -69,7 +69,7 @@ def _last_date_in_sheet(ws, check_data_col: int | None = None) -> date | None:
     return last
 
 
-def _get_column_index(ws, ticker: str) -> int | None:
+def _get_column_index(ws, ticker: str):
     """Find the 1-based column index of ticker in row 1, or None."""
     for col in range(1, ws.max_column + 2):
         val = ws.cell(row=1, column=col).value
@@ -92,7 +92,7 @@ def _ensure_ticker_column(ws, ticker: str) -> int:
 
 # ── Scraping ──────────────────────────────────────────────────────────────────
 
-def _scrape_screener(ticker: str) -> dict | None:
+def _scrape_screener(ticker: str):
     """
     Scrape current price and P/B ratio for a ticker from Screener.in.
     Returns {"price": float, "pb": float} or None.
@@ -175,7 +175,7 @@ def _scrape_screener(ticker: str) -> dict | None:
     return {"price": price, "pb": pb}
 
 
-def _scrape_nse_price(ticker: str) -> float | None:
+def _scrape_nse_price(ticker: str):
     """Fetch current price from NSE public API as fallback when Screener.in fails."""
     import urllib.request
     import json as _json
@@ -201,7 +201,7 @@ def _scrape_nse_price(ticker: str) -> float | None:
 
 # ── XLSX update ───────────────────────────────────────────────────────────────
 
-def _update_xlsx(results: dict[str, dict | None], target_date: date) -> bool:
+def _update_xlsx(results, target_date):
     """
     Append one row of prices and one row of P/B ratios to stock.xlsx.
     results: {ticker: {"price": float, "pb": float} or None}
@@ -257,7 +257,7 @@ def _update_xlsx(results: dict[str, dict | None], target_date: date) -> bool:
 
 # ── Main logic ────────────────────────────────────────────────────────────────
 
-def scrape_stocks(target_date: date | None = None) -> bool:
+def scrape_stocks(target_date=None):
     if target_date is None:
         target_date = date.today() - timedelta(days=1)
 
