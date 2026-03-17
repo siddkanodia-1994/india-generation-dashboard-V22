@@ -15,7 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import CSV_PATHS, SCREENER_BASE_URL, STOCK_TICKERS
+from config import CSV_PATHS, SCREENER_BASE_URL, STOCK_TICKERS, TICKER_COLUMN_NAMES
 
 HEADERS = {
     "User-Agent": (
@@ -218,20 +218,10 @@ def _update_xlsx(results: dict[str, dict | None], target_date: date) -> bool:
         wb.active.title = "Prices"
         wb.create_sheet("P/B")
 
-    # Note: "/" is not allowed in Excel sheet names — use "PB" instead of "P/B"
-    # Handle existing workbooks that may have "P/B" sheet name
-    pb_sheet_name = "PB"
-    if "P/B" in wb.sheetnames:
-        wb["P/B"].title = "PB"
+    prices_ws = wb["Stock Prices"]
+    pb_ws     = wb["Stock P-B"]
 
-    prices_ws = wb["Prices"] if "Prices" in wb.sheetnames else wb.active
-    pb_ws     = wb[pb_sheet_name] if pb_sheet_name in wb.sheetnames else wb.create_sheet(pb_sheet_name)
-
-    # Ensure headers exist
-    if prices_ws.max_row == 0 or prices_ws.cell(1, 1).value is None:
-        prices_ws.cell(1, 1, "Date")
-    if pb_ws.max_row == 0 or pb_ws.cell(1, 1).value is None:
-        pb_ws.cell(1, 1, "Date")
+    # Headers already exist in "Stock Prices" and "Stock P-B"
 
     # Idempotency check — use check_data_col=2 so pre-populated date rows with no
     # actual ticker data don't falsely trigger the skip
@@ -252,8 +242,9 @@ def _update_xlsx(results: dict[str, dict | None], target_date: date) -> bool:
     for ticker, data in results.items():
         if data is None:
             continue
-        price_col = _ensure_ticker_column(prices_ws, ticker)
-        pb_col    = _ensure_ticker_column(pb_ws, ticker)
+        col_name  = TICKER_COLUMN_NAMES.get(ticker, ticker)
+        price_col = _ensure_ticker_column(prices_ws, col_name)
+        pb_col    = _ensure_ticker_column(pb_ws, col_name)
 
         if data.get("price") is not None:
             prices_ws.cell(price_new_row, price_col, data["price"])

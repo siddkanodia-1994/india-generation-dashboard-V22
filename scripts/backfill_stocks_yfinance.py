@@ -20,7 +20,7 @@ import yfinance as yf
 import openpyxl
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import CSV_PATHS, STOCK_TICKERS
+from config import CSV_PATHS, STOCK_TICKERS, TICKER_COLUMN_NAMES
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -84,7 +84,7 @@ def _last_filled_date(ws):
 def backfill(start: date, end: date) -> None:
     xlsx_path = CSV_PATHS["stocks"]
     wb = openpyxl.load_workbook(xlsx_path)
-    prices_ws = wb["Prices"] if "Prices" in wb.sheetnames else wb.active
+    prices_ws = wb["Stock Prices"]
 
     # Build date → row index from column A
     date_row = {}
@@ -136,7 +136,8 @@ def backfill(start: date, end: date) -> None:
             sym = f"{ticker}.NS"
             price = row_data.get(sym)
             if price is not None and not pd.isna(price):
-                col = _ensure_ticker_column(prices_ws, ticker)
+                col_name = TICKER_COLUMN_NAMES.get(ticker, ticker)
+                col = _ensure_ticker_column(prices_ws, col_name)
                 prices_ws.cell(r, col, round(float(price), 2))
                 any_written = True
         if any_written:
@@ -168,7 +169,7 @@ def main():
         xlsx_path = CSV_PATHS["stocks"]
         if Path(xlsx_path).exists():
             wb = openpyxl.load_workbook(xlsx_path)
-            prices_ws = wb["Prices"] if "Prices" in wb.sheetnames else wb.active
+            prices_ws = wb["Stock Prices"]
             last = _last_filled_date(prices_ws)
             start = (last + timedelta(days=1)) if last else date(2026, 1, 20)
             print(f"[BACKFILL] Auto-detected start: {start} (last filled: {last})")

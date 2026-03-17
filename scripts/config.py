@@ -22,6 +22,21 @@ STOCK_TICKERS = [
     "TATAPOWER",
 ]
 
+# Maps ticker symbol → exact column header used in stock.xlsx "Stock Prices" / "Stock P-B"
+TICKER_COLUMN_NAMES = {
+    "ACMESOLAR":  "Acme Solar Holdings Ltd",
+    "ADANIGREEN": "Adani Green Energy Ltd",
+    "ADANIPOWER": "Adani Power Ltd",
+    "CESC":       "CESC Ltd",
+    "INOXWIND":   "Inox Wind Ltd.",
+    "JSWENERGY":  "JSW Energy Ltd",
+    "NTPC":       "NTPC Ltd",
+    "PFC":        "Power Finance Corporation Ltd.",
+    "RECLTD":     "REC Ltd",
+    "SUZLON":     "Suzlon Energy Ltd.",
+    "TATAPOWER":  "Tata Power Company Ltd",
+}
+
 # ── CSV / XLSX paths (relative to repo root) ─────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
