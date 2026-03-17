@@ -142,21 +142,33 @@ def _scrape_screener(ticker: str):
                         pass
 
     # ── P/B Ratio ─────────────────────────────────────────────────────────
-    # Screener.in labels: "Price to Book value", "Price to book value", "P/B"
-    pb_keywords = ["price to book", "p/b", "pb ratio", "book value"]
+    # Screener shows "Book Value" (per share), not always "Price to Book".
+    # If only book value is found, compute P/B = price / book_value.
+    pb_direct_kws = ["price to book", "p/b", "pb ratio"]
+    book_value = None
+
     for li in soup.find_all("li"):
         name_el = li.find("span", class_="name")
         num_el  = li.find("span", class_="number")
-        if name_el and num_el:
-            label = name_el.get_text(strip=True).lower()
-            if any(kw in label for kw in pb_keywords):
-                text = re.sub(r"[^\d.]", "", num_el.get_text())
-                try:
-                    pb = float(text)
-                except Exception:
-                    pass
-                break
-    # Fallback: search raw text for "Price to Book" pattern
+        if not (name_el and num_el):
+            continue
+        label = name_el.get_text(strip=True).lower()
+        text  = re.sub(r"[^\d.]", "", num_el.get_text())
+        try:
+            val = float(text)
+        except Exception:
+            continue
+        if any(kw in label for kw in pb_direct_kws):
+            pb = val
+            break                          # direct P/B found — done
+        if "book value" in label and book_value is None:
+            book_value = val               # per-share; keep searching for direct P/B
+
+    # Compute P/B from book value if no direct ratio found
+    if pb is None and book_value is not None and price is not None and book_value > 0:
+        pb = round(price / book_value, 2)
+
+    # Fallback: raw text search for "Price to Book Value"
     if pb is None:
         pb_match = re.search(
             r"Price\s+to\s+Book\s+[Vv]alue\s*[\n\r\s]*(\d+\.?\d*)",
