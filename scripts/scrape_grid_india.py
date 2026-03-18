@@ -66,7 +66,16 @@ def _format_date(d: date) -> str:
 
 
 def _append_csv(path: str, row: list) -> None:
-    with open(path, "a", newline="") as f:
+    p = Path(path)
+    # Ensure file ends with a newline before appending
+    if p.exists() and p.stat().st_size > 0:
+        with open(p, "rb") as f:
+            f.seek(-1, 2)
+            last_byte = f.read(1)
+        if last_byte not in (b"\n", b"\r"):
+            with open(p, "a") as f:
+                f.write("\n")
+    with open(p, "a", newline="") as f:
         csv.writer(f).writerow(row)
 
 
@@ -114,7 +123,11 @@ def _date_variants(d: date) -> list:
 def _find_excel_url(target_date: date):
     """
     Use Playwright to render the Grid India Daily PSP Report page and find
-    the Excel download link for target_date. Returns full URL or None.
+    the Excel (.xls/.xlsx) download link for target_date.
+
+    Actual URL format (from CDN):
+      https://webcdn.grid-india.in/files/grdw/YYYY/MM/DD.MM.YY_NLDC_PSP_{id}.xls
+    The date prefix DD.MM.YY is the data date embedded in the filename.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -122,7 +135,8 @@ def _find_excel_url(target_date: date):
         print("[GRID] Playwright not installed.")
         return None
 
-    variants = _date_variants(target_date)
+    # Match filename prefix DD.MM.YY (e.g. "17.03.26")
+    date_prefix = target_date.strftime("%d.%m.%y")
 
     print(f"[GRID] Loading page: {GRID_INDIA_REPORTS_URL}")
     with sync_playwright() as pw:
@@ -130,19 +144,16 @@ def _find_excel_url(target_date: date):
         page = context.new_page()
         try:
             page.goto(GRID_INDIA_REPORTS_URL, wait_until="domcontentloaded", timeout=60000)
-            # Wait for network to settle (React hydration)
             try:
                 page.wait_for_load_state("networkidle", timeout=20000)
             except Exception:
                 pass
-            # Try to wait for any Excel/xls links to appear
             try:
                 page.wait_for_selector("a[href*='.xls']", timeout=20000)
             except Exception:
                 pass
             page.wait_for_timeout(2000)
 
-            # Extract all hrefs from rendered DOM
             hrefs = page.eval_on_selector_all(
                 "a[href]",
                 "els => els.map(e => e.getAttribute('href'))"
@@ -154,42 +165,85 @@ def _find_excel_url(target_date: date):
         finally:
             browser.close()
 
-    # Filter for Excel links matching the target date
     for href in hrefs:
         if not href:
             continue
         lower = href.lower()
-        if not (lower.endswith(".xlsx") or lower.endswith(".xls")):
+        # Must be an Excel file
+        if not (lower.endswith(".xls") or lower.endswith(".xlsx")):
             continue
-        for v in variants:
-            if v in href:
-                full = href if href.startswith("http") else GRID_INDIA_PDF_BASE + href
-                print(f"[GRID] Found Excel: {full}")
-                return full
+        # Filename must start with DD.MM.YY (e.g. "17.03.26_NLDC_PSP_...")
+        filename = href.rsplit("/", 1)[-1]
+        if filename.startswith(date_prefix):
+            full = href if href.startswith("http") else GRID_INDIA_PDF_BASE + href
+            print(f"[GRID] Found Excel: {full}")
+            return full
 
-    # Fallback: try common direct URL patterns (may work even on SPA sites)
-    print("[GRID] No Excel link found in rendered DOM, trying direct URL patterns...")
-    for pattern in [
-        f"/NLDC/NLDC_Daily_Report/PSP_{target_date.strftime('%d_%m_%Y')}.xlsx",
-        f"/uploads/PSP_{target_date.strftime('%d_%m_%Y')}.xlsx",
-        f"/reports/daily-psp-report/PSP_{target_date.strftime('%d_%m_%Y')}.xlsx",
-        f"/assets/PSP_{target_date.strftime('%d_%m_%Y')}.xlsx",
-    ]:
-        url = GRID_INDIA_PDF_BASE + pattern
-        try:
-            resp = requests.head(url, headers=HEADERS, timeout=10, allow_redirects=True)
-            if resp.status_code == 200:
-                print(f"[GRID] Direct URL found: {url}")
-                return url
-        except Exception:
-            continue
+    return None
+
+
+# ── Excel loading (supports both .xls and .xlsx) ──────────────────────────────
+
+class _Cell:
+    """Minimal cell wrapper so xlrd and openpyxl share the same interface."""
+    __slots__ = ("value",)
+    def __init__(self, value):
+        self.value = value if value != "" else None
+
+
+class _SheetAdapter:
+    """
+    Wraps either an openpyxl worksheet or an xlrd sheet so that
+    callers can use .cell(row, column) with 1-based indices and .max_row.
+    """
+    def __init__(self, sheet, xlrd_mode: bool = False):
+        self._s = sheet
+        self._xlrd = xlrd_mode
+
+    @property
+    def max_row(self):
+        return self._s.nrows if self._xlrd else self._s.max_row
+
+    def cell(self, row: int, column: int):
+        if self._xlrd:
+            try:
+                val = self._s.cell_value(row - 1, column - 1)
+            except IndexError:
+                val = None
+            return _Cell(val)
+        return self._s.cell(row=row, column=column)
+
+
+def _open_sheet(excel_bytes: bytes, sheet_name: str):
+    """
+    Open an Excel file (either .xls or .xlsx) from bytes and return a
+    _SheetAdapter for the named sheet, or None on failure.
+    """
+    # Try openpyxl first (xlsx)
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(excel_bytes), data_only=True)
+        if sheet_name in wb.sheetnames:
+            return _SheetAdapter(wb[sheet_name], xlrd_mode=False)
+        print(f"[GRID] openpyxl: sheet '{sheet_name}' not found. Available: {wb.sheetnames}")
+    except Exception:
+        pass
+
+    # Fall back to xlrd (xls)
+    try:
+        import xlrd
+        wb = xlrd.open_workbook(file_contents=excel_bytes)
+        ws = wb.sheet_by_name(sheet_name)
+        return _SheetAdapter(ws, xlrd_mode=True)
+    except Exception as e:
+        print(f"[GRID] xlrd failed: {e}")
 
     return None
 
 
 # ── Excel parsing helpers ──────────────────────────────────────────────────────
 
-def _find_row(ws, keyword: str, start: int = 1, max_scan: int = 200):
+def _find_row(ws: _SheetAdapter, keyword: str, start: int = 1, max_scan: int = 200):
     """
     Scan column A from start to start+max_scan for a cell whose string value
     contains keyword (case-insensitive). Returns the row number or None.
@@ -197,21 +251,18 @@ def _find_row(ws, keyword: str, start: int = 1, max_scan: int = 200):
     kw = keyword.lower()
     end = min(start + max_scan, ws.max_row + 1)
     for r in range(start, end):
-        cell = ws.cell(row=r, column=1)
-        val = str(cell.value or "").strip().lower()
+        val = str(ws.cell(row=r, column=1).value or "").strip().lower()
         if kw in val:
             return r
     return None
 
 
-def _find_row_after(ws, keyword: str, start: int, max_scan: int = 20):
-    """
-    Like _find_row but starts at start+1 (for anchored section searches).
-    """
+def _find_row_after(ws: _SheetAdapter, keyword: str, start: int, max_scan: int = 20):
+    """Like _find_row but starts at start+1 (for anchored section searches)."""
     return _find_row(ws, keyword, start=start + 1, max_scan=max_scan)
 
 
-def _cell_float(ws, row: int, col: int):
+def _cell_float(ws: _SheetAdapter, row: int, col: int):
     """Return float value of cell or None."""
     if row is None:
         return None
@@ -224,19 +275,13 @@ def _cell_float(ws, row: int, col: int):
         return None
 
 
-def _parse_mop_e(wb) -> dict:
+def _parse_mop_e(ws: _SheetAdapter) -> dict:
     """
     Parse the MOP_E sheet and return a dict with keys:
       supply_mu, peak_demand_gw, total_gen_mu, renewable_mu, thermal_mu
     Missing values are None.
     """
     result = {}
-
-    if "MOP_E" not in wb.sheetnames:
-        print(f"[GRID] Sheet 'MOP_E' not found. Available: {wb.sheetnames}")
-        return result
-
-    ws = wb["MOP_E"]
     H = 8  # column index for "All India" / Total column
 
     # ── Supply (Energy Met MU) ────────────────────────────────────────────────
@@ -333,14 +378,12 @@ def scrape_grid_india(target_date=None) -> bool:
         print(f"[GRID] Failed to download Excel: {e}")
         return False
 
-    try:
-        from openpyxl import load_workbook
-        wb = load_workbook(io.BytesIO(excel_bytes), data_only=True)
-    except Exception as e:
-        print(f"[GRID] Failed to open workbook: {e}")
+    ws = _open_sheet(excel_bytes, "MOP_E")
+    if ws is None:
+        print("[GRID] ERROR: Could not open MOP_E sheet from workbook.")
         return False
 
-    data = _parse_mop_e(wb)
+    data = _parse_mop_e(ws)
     if not data:
         print("[GRID] ERROR: Could not extract any data from MOP_E sheet.")
         return False
