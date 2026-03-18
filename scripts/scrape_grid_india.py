@@ -298,12 +298,12 @@ def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
 
                 navigated = False
                 for selector in [
-                    "button:has-text('Next')",
-                    "button:has-text('>')",
+                    "button:text-is('>')",            # exact match — confirmed Grid India ">" next-page button
+                    "button:has-text('>')",            # fallback substring match
+                    "button:text-is('›')",            # single angle quotation mark variant
                     "button:has-text('›')",
-                    "button:has-text('»')",
+                    "button[aria-label*='next' i]",   # aria-label containing 'next'
                     "[aria-label='Next page']",
-                    "[aria-label='next']",
                     ".pagination-next",
                     "li.next a",
                 ]:
