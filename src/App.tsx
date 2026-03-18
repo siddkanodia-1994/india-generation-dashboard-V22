@@ -193,7 +193,7 @@ export default function App() {
               calcMode="sum"
               valueDisplay={{
                 suffix: " MU",
-                decimals: 2,
+                decimals: 0,
               }}
               extraBadgeCols={[]}
               showYoyBadge={true}
