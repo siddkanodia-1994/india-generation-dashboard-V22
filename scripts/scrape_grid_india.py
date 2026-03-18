@@ -191,6 +191,119 @@ def _find_excel_url(target_date: date):
     return None
 
 
+def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
+    """
+    Single Playwright session that navigates all pages of Grid India PSP reports
+    and returns a {date: url} dict for all Excel files in [start_date, end_date].
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[GRID] Playwright not installed.")
+        return {}
+
+    result = {}
+
+    print(f"[GRID] Collecting all Excel URLs from {start_date} to {end_date}...")
+    with sync_playwright() as pw:
+        browser, context = _make_browser_context(pw)
+        page = context.new_page()
+        try:
+            page.goto(GRID_INDIA_REPORTS_URL, wait_until="domcontentloaded", timeout=60000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception:
+                pass
+            try:
+                page.wait_for_selector("a[href*='.xls']", timeout=20000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+
+            # Switch to 100 per page
+            try:
+                sel = page.locator("select").filter(has_text="50")
+                if sel.count():
+                    sel.first.select_option("100")
+                    page.wait_for_timeout(2000)
+            except Exception:
+                pass
+
+            page_num = 1
+            while True:
+                hrefs = page.eval_on_selector_all(
+                    "a[href]",
+                    "els => els.map(e => e.getAttribute('href'))"
+                )
+                found_this_page = 0
+                for href in hrefs:
+                    if not href:
+                        continue
+                    lower = href.lower()
+                    if not (lower.endswith(".xls") or lower.endswith(".xlsx")):
+                        continue
+                    filename = href.rsplit("/", 1)[-1]
+                    # Filename prefix: DD.MM.YY  e.g. "17.03.26_NLDC_PSP_..."
+                    try:
+                        prefix = filename.split("_")[0]
+                        day, mon, yr = prefix.split(".")
+                        yr_full = 2000 + int(yr)
+                        d = date(yr_full, int(mon), int(day))
+                    except Exception:
+                        continue
+                    if start_date <= d <= end_date:
+                        full = href if href.startswith("http") else GRID_INDIA_PDF_BASE + href
+                        if d not in result:
+                            result[d] = full
+                            found_this_page += 1
+
+                print(f"[GRID] Page {page_num}: found {found_this_page} new URLs in range ({len(result)} total so far)")
+
+                # Try to navigate to next page
+                navigated = False
+                try:
+                    # Log available buttons on first page for debugging
+                    if page_num == 1:
+                        btns = page.eval_on_selector_all("button", "els => els.map(e => e.textContent.trim())")
+                        print(f"[GRID] Pagination buttons visible: {btns[:10]}")
+
+                    # Try common next-page selectors
+                    for selector in [
+                        "button:has-text('Next')",
+                        "button:has-text('>')",
+                        "button:has-text('›')",
+                        "button:has-text('»')",
+                        "[aria-label='Next page']",
+                        "[aria-label='next']",
+                        ".pagination-next",
+                        "li.next a",
+                    ]:
+                        try:
+                            btn = page.locator(selector).first
+                            if btn.count() and btn.is_visible() and btn.is_enabled():
+                                btn.click()
+                                page.wait_for_timeout(2500)
+                                navigated = True
+                                page_num += 1
+                                break
+                        except Exception:
+                            continue
+                except Exception as e:
+                    print(f"[GRID] Pagination error: {e}")
+
+                if not navigated:
+                    print(f"[GRID] No more pages found after page {page_num}.")
+                    break
+
+        except Exception as e:
+            print(f"[GRID] _collect_all_excel_urls failed: {e}")
+        finally:
+            browser.close()
+
+    print(f"[GRID] Total Excel URLs collected: {len(result)}")
+    return result
+
+
 # ── Excel loading (supports both .xls and .xlsx) ──────────────────────────────
 
 class _Cell:
@@ -427,9 +540,12 @@ def _parse_mop_e(ws: _SheetAdapter) -> dict:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def scrape_grid_india(target_date=None) -> bool:
+def scrape_grid_india(target_date=None, excel_url=None) -> bool:
     """
     Returns True on success. Raises SystemExit(2) if Excel not yet published.
+
+    excel_url: optional pre-fetched URL (skips Playwright discovery when provided,
+               e.g. from _collect_all_excel_urls during backfill).
     """
     if target_date is None:
         target_date = datetime.now(IST).date() - timedelta(days=1)
@@ -448,7 +564,8 @@ def scrape_grid_india(target_date=None) -> bool:
 
     print(f"[GRID] Looking for Excel file for {target_date}...")
 
-    excel_url = _find_excel_url(target_date)
+    if excel_url is None:
+        excel_url = _find_excel_url(target_date)
     if excel_url is None:
         print(f"[GRID] Excel not yet available for {target_date}. Will retry.")
         sys.exit(2)  # GitHub Actions retry signal

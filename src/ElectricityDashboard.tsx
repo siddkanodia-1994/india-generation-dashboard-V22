@@ -713,6 +713,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
   const [extraLatestValues, setExtraLatestValues] = useState<Map<string, number>>(new Map());
   const [extraTextValues, setExtraTextValues] = useState<Map<string, string>>(new Map());
+  const [textByDate, setTextByDate] = useState<Map<string, Map<string, string>>>(new Map());
 
   const [fromIso, setFromIso] = useState("");
   const [toIso, setToIso] = useState("");
@@ -852,6 +853,33 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
               if (ep.length) extra.set(key, ep[ep.length - 1].value);
             }
           }
+
+          // Build per-date text lookup for tooltip (all rows)
+          const textColIndices: Array<[string, number]> = [];
+          for (const { key, isText } of extraBadgeCols) {
+            if (isText) {
+              const ci = headerCols.indexOf(key);
+              if (ci >= 0) textColIndices.push([key, ci]);
+            }
+          }
+          if (textColIndices.length) {
+            const byDate = new Map<string, Map<string, string>>();
+            for (let i = 1; i < rawLines.length; i++) {
+              const cols = rawLines[i].split(",");
+              const rawDate = cols[0]?.trim();
+              if (!rawDate) continue;
+              const isoDate = parseInputDate(rawDate);
+              if (!isoDate) continue;
+              const dayLabel = formatDDMMYYYY(isoDate);
+              const entry = new Map<string, string>();
+              for (const [key, ci] of textColIndices) {
+                if (cols[ci] != null) entry.set(key, cols[ci].trim());
+              }
+              byDate.set(dayLabel, entry);
+            }
+            if (!cancelled) setTextByDate(byDate);
+          }
+
           if (!cancelled) {
             setExtraLatestValues(extra);
             setExtraTextValues(textExtra);
@@ -1822,7 +1850,24 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
 
                           return [v, String(name)];
                         }}
-                        labelFormatter={(l: any) => `Label: ${l}`}
+                        labelFormatter={(l: any) => {
+                          const timeEntry = textByDate.get(l as string);
+                          if (!timeEntry || timeEntry.size === 0) return `Label: ${l}`;
+                          return (
+                            <span>
+                              {`Label: ${l}`}
+                              {Array.from(timeEntry.entries()).map(([key, val]) => {
+                                const col = extraBadgeCols?.find((c) => c.key === key);
+                                return (
+                                  <span key={key}>
+                                    <br />
+                                    {col?.label ?? key}: {val}
+                                  </span>
+                                );
+                              })}
+                            </span>
+                          );
+                        }}
                       />
                       <Legend />
 
