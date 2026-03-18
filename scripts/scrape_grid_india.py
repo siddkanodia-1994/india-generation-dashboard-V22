@@ -266,55 +266,180 @@ def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
                 pass
             page.wait_for_timeout(1500)
 
-            # ── Step 1: Select each financial year from the Date Filter ─────────
-            # The Date Filter is a <select> whose options include FY labels like "2022-23".
-            # We iterate each FY that overlaps [start_date, end_date] and collect URLs
-            # per year, then switch to the next year.  This avoids needing "ALL" to work.
+            # ── Step 1: Interact with the custom React Date Filter ───────────────
+            # The Date Filter is a custom React component (NOT a native <select>).
+            # We use JavaScript evaluation to find the dropdown trigger and click options.
+
             fy_list = _fy_labels_in_range(start_date, end_date)
             print(f"[GRID] Financial years to collect: {fy_list}")
 
-            # Log all selects on page for debugging
-            all_sels = page.locator("select").all()
-            for idx, sel in enumerate(all_sels):
-                try:
-                    opts_text = [
-                        (o.get_attribute("value") or o.inner_text() or "").strip()
-                        for o in sel.locator("option").all()
-                    ]
-                    print(f"[GRID] select[{idx}] options: {opts_text[:6]}")
-                except Exception:
-                    pass
+            def _js_click_exact_text(text, exclude_nav=False):
+                """Click the first visible leaf DOM element whose text exactly matches `text`.
+                If exclude_nav=True, skips elements inside <nav> or <header>."""
+                clicked = page.evaluate(
+                    """([lbl, exNav]) => {
+                        const all = [...document.querySelectorAll('*')];
+                        const el = all.find(e =>
+                            e.children.length === 0 &&
+                            e.textContent.trim() === lbl &&
+                            e.offsetParent !== null &&
+                            (!exNav || (!e.closest('nav') && !e.closest('header')))
+                        );
+                        if (el) { el.click(); return el.tagName + '|' + (el.className||'').substring(0,60); }
+                        return null;
+                    }""",
+                    [text, exclude_nav],
+                )
+                if clicked:
+                    print(f"[GRID] JS-clicked '{text}' → {clicked}")
+                    return True
+                return False
 
-            # Find the Date Filter select — the one whose options match "YYYY-YY" pattern
-            date_filter_sel = None
-            for sel in all_sels:
+            def _visible_short_texts():
+                """Return list of visible leaf texts (≤25 chars) for debugging."""
                 try:
-                    opts_text = [
-                        (o.get_attribute("value") or o.inner_text() or "").strip()
-                        for o in sel.locator("option").all()
-                    ]
-                    if any(re.search(r"\d{4}-\d{2}", o) for o in opts_text):
-                        date_filter_sel = sel
-                        all_opts = opts_text
-                        print(f"[GRID] Date Filter select found with options: {opts_text}")
-                        break
+                    return page.evaluate(r"""() => {
+                        return [...document.querySelectorAll('*')]
+                            .filter(el =>
+                                el.children.length === 0 &&
+                                el.offsetParent !== null &&
+                                el.textContent.trim().length > 0 &&
+                                el.textContent.trim().length <= 25
+                            )
+                            .map(el => el.textContent.trim())
+                            .filter((v, i, a) => a.indexOf(v) === i)
+                            .slice(0, 40);
+                    }""")
                 except Exception:
-                    continue
+                    return []
 
-            if date_filter_sel is None:
-                print("[GRID] WARNING: Date Filter select not found — will collect only default view")
-                fy_list = [None]   # sentinel: run once without changing filter
+            def _get_fy_trigger_text():
+                """Return the text currently shown in the Date Filter trigger (e.g. '2025-26').
+                Also logs detailed DOM info so we can identify the correct element."""
+                try:
+                    debug_info = page.evaluate(r"""() => {
+                        const fyPat = /^\d{4}-\d{2}$/;
+                        const all = [...document.querySelectorAll('*')];
+                        return all
+                            .filter(el => fyPat.test(el.textContent.trim()))
+                            .map(el => ({
+                                text: el.textContent.trim(),
+                                tag: el.tagName,
+                                id: el.id || '',
+                                cls: (el.className || '').substring(0, 100),
+                                parentTag: el.parentElement ? el.parentElement.tagName : '',
+                                parentCls: (el.parentElement
+                                            ? el.parentElement.className || ''
+                                            : '').substring(0, 100),
+                                gpCls: (el.parentElement && el.parentElement.parentElement
+                                        ? el.parentElement.parentElement.className || ''
+                                        : '').substring(0, 100),
+                                inNav: !!el.closest('nav'),
+                                inHeader: !!el.closest('header'),
+                                visible: el.offsetParent !== null,
+                            }));
+                    }""")
+                    print(f"[GRID] FY elements on page: {debug_info}")
+                    # Prefer visible elements not inside <nav> or <header>
+                    candidates = [d for d in debug_info if d['visible'] and not d['inNav'] and not d['inHeader']]
+                    if candidates:
+                        return candidates[0]['text']
+                    # Fallback to any visible
+                    visible = [d for d in debug_info if d['visible']]
+                    return visible[0]['text'] if visible else None
+                except Exception as e:
+                    print(f"[GRID] _get_fy_trigger_text error: {e}")
+                    return None
+
+            def _select_date_filter(label):
+                """Open the React Select Date Filter and click the option for `label`.
+                Uses .my-select__control to open and [class*='my-select__option'] to select."""
+                try:
+                    # Click the React Select control div to open the dropdown
+                    control = page.locator(".my-select__control").first
+                    if not control.count():
+                        print("[GRID] .my-select__control not found on page")
+                        return False
+
+                    print(f"[GRID] Opening React Select Date Filter for '{label}'")
+                    control.click()
+                    page.wait_for_timeout(1000)
+
+                    # Inspect what options React Select rendered
+                    options_info = page.evaluate("""() => {
+                        return [...document.querySelectorAll('[class*="my-select__option"]')]
+                            .map(el => ({
+                                text: el.textContent.trim(),
+                                cls: (el.className || '').substring(0, 80),
+                            }));
+                    }""")
+                    print(f"[GRID] React Select options: {options_info}")
+
+                    # Click the matching option directly via JS (bypasses offsetParent issues)
+                    clicked = page.evaluate(
+                        """([lbl]) => {
+                            const opts = [...document.querySelectorAll('[class*="my-select__option"]')];
+                            const el = opts.find(e => e.textContent.trim() === lbl);
+                            if (el) { el.click(); return (el.className || '').substring(0, 80); }
+                            return null;
+                        }""",
+                        [label],
+                    )
+
+                    if clicked:
+                        # Wait for the table to reload after filter change
+                        try:
+                            page.wait_for_selector("a[href*='.xls']", timeout=15000)
+                        except Exception:
+                            pass
+                        page.wait_for_timeout(1500)
+                        print(f"[GRID] Selected '{label}' → {clicked}")
+                        return True
+
+                    print(f"[GRID] Option '{label}' not in React Select menu")
+                    page.keyboard.press("Escape")
+                    return False
+                except Exception as e:
+                    print(f"[GRID] _select_date_filter({label}) error: {e}")
+                    return False
+
+            # Try selecting ALL first — if it works, one pass covers every year
+            if _select_date_filter("ALL"):
+                fy_list = [None]  # single pass with all years visible
+                print("[GRID] Using 'ALL' years — will paginate through entire history")
             else:
-                fy_list = fy_list  # iterate per FY year
+                print("[GRID] 'ALL' selection failed — falling back to per-FY iteration")
 
             def _set_100_per_page():
+                """Set the per-page count to 100.
+                Waits for the <select> to appear, then dispatches a React-compatible change."""
                 try:
-                    per_page_sel = page.locator("select").filter(has_text="50")
-                    if per_page_sel.count():
-                        per_page_sel.first.select_option("100")
-                        page.wait_for_timeout(2000)
-                except Exception:
-                    pass
+                    # Wait for per-page select to be present in DOM
+                    page.wait_for_selector("select", timeout=10000)
+                    changed = page.evaluate("""() => {
+                        const sel = document.querySelector('select');
+                        if (!sel) return 'no select found';
+                        const opts = [...sel.options].map(o => o.value);
+                        const best = opts.includes('100') ? '100'
+                                    : opts.includes('75') ? '75'
+                                    : opts.includes('50') ? '50'
+                                    : null;
+                        if (!best) return 'no 100/75/50 option';
+                        const nativeSetter = Object.getOwnPropertyDescriptor(
+                            window.HTMLSelectElement.prototype, 'value').set;
+                        nativeSetter.call(sel, best);
+                        sel.dispatchEvent(new Event('change', { bubbles: true }));
+                        return best;
+                    }""")
+                    print(f"[GRID] Per-page change result: {changed}")
+                    # Wait for table to reload with new per-page setting
+                    try:
+                        page.wait_for_selector("a[href*='.xls']", timeout=15000)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(1500)
+                except Exception as e:
+                    print(f"[GRID] _set_100_per_page error: {e}")
 
             def _next_page():
                 """Click the '>' next-page button. Returns True if navigated."""
@@ -332,7 +457,11 @@ def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
                         btn = page.locator(selector).first
                         if btn.count() and btn.is_visible() and btn.is_enabled():
                             btn.click()
-                            page.wait_for_timeout(2500)
+                            try:
+                                page.wait_for_selector("a[href*='.xls']", timeout=10000)
+                            except Exception:
+                                pass
+                            page.wait_for_timeout(1500)
                             return True
                     except Exception:
                         continue
@@ -341,18 +470,10 @@ def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
             # ── Steps 2+3: For each FY, select it, set 100/page, paginate ───────
             logged_buttons = False
             for fy in fy_list:
-                if date_filter_sel is not None and fy is not None:
-                    # Select this financial year from the Date Filter
-                    match = next((o for o in all_opts if fy in o), None)
-                    if match is None:
-                        print(f"[GRID] FY '{fy}' not in dropdown options — skipping")
-                        continue
+                if fy is not None:
                     print(f"[GRID] Selecting FY: {fy}")
-                    try:
-                        date_filter_sel.select_option(match)
-                        page.wait_for_timeout(2500)
-                    except Exception as e:
-                        print(f"[GRID] Could not select FY {fy}: {e}")
+                    if not _select_date_filter(fy):
+                        print(f"[GRID] Could not select FY '{fy}' — skipping")
                         continue
 
                 _set_100_per_page()
