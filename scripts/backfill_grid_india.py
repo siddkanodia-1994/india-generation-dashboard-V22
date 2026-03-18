@@ -77,7 +77,7 @@ def main():
     for i, d in enumerate(missing, 1):
         print(f"\n[BACKFILL] [{i}/{len(missing)}] {d}")
         try:
-            scrape_grid_india(target_date=d, excel_url=url_map[d])
+            scrape_grid_india(target_date=d, excel_url=url_map[d], force=True)
         except SystemExit as e:
             # scrape_grid_india uses sys.exit(2) for "not yet available"
             if e.code == 2:

@@ -18,6 +18,7 @@ Usage:
 import argparse
 import csv
 import io
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -59,6 +60,26 @@ def _last_date_in_csv(path: str):
         return date(y, int(m), int(d))
     except Exception:
         return None
+
+
+def _fy_label(d: date) -> str:
+    """Return Indian financial year label for a date, e.g. '2025-26'."""
+    if d.month >= 4:
+        return f"{d.year}-{str(d.year + 1)[2:]}"
+    return f"{d.year - 1}-{str(d.year)[2:]}"
+
+
+def _fy_labels_in_range(start: date, end: date) -> list:
+    """Return sorted list of FY labels that overlap [start, end]."""
+    labels = set()
+    d = start
+    while d <= end:
+        lbl = _fy_label(d)
+        labels.add(lbl)
+        y = int(lbl.split("-")[0])
+        d = date(y + 1, 4, 1)
+    labels.add(_fy_label(end))
+    return sorted(labels)
 
 
 def _format_date(d: date) -> str:
@@ -245,64 +266,64 @@ def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
                 pass
             page.wait_for_timeout(1500)
 
-            # ── Step 1: Select "ALL" from the Date Filter dropdown ──────────────
-            # The Date Filter select has FY-pattern options like "2022-23" (7 chars, hyphen at pos 4).
-            # "ALL" is the first option and shows all financial years at once.
+            # ── Step 1: Select each financial year from the Date Filter ─────────
+            # The Date Filter is a <select> whose options include FY labels like "2022-23".
+            # We iterate each FY that overlaps [start_date, end_date] and collect URLs
+            # per year, then switch to the next year.  This avoids needing "ALL" to work.
+            fy_list = _fy_labels_in_range(start_date, end_date)
+            print(f"[GRID] Financial years to collect: {fy_list}")
+
+            # Log all selects on page for debugging
+            all_sels = page.locator("select").all()
+            for idx, sel in enumerate(all_sels):
+                try:
+                    opts_text = [
+                        (o.get_attribute("value") or o.inner_text() or "").strip()
+                        for o in sel.locator("option").all()
+                    ]
+                    print(f"[GRID] select[{idx}] options: {opts_text[:6]}")
+                except Exception:
+                    pass
+
+            # Find the Date Filter select — the one whose options match "YYYY-YY" pattern
             date_filter_sel = None
-            for sel in page.locator("select").all():
-                opts = [
-                    (o.get_attribute("value") or o.inner_text() or "").strip()
-                    for o in sel.locator("option").all()
-                ]
-                if any(len(o) == 7 and o[4] == "-" for o in opts):
-                    date_filter_sel = sel
-                    break
+            for sel in all_sels:
+                try:
+                    opts_text = [
+                        (o.get_attribute("value") or o.inner_text() or "").strip()
+                        for o in sel.locator("option").all()
+                    ]
+                    if any(re.search(r"\d{4}-\d{2}", o) for o in opts_text):
+                        date_filter_sel = sel
+                        all_opts = opts_text
+                        print(f"[GRID] Date Filter select found with options: {opts_text}")
+                        break
+                except Exception:
+                    continue
 
-            if date_filter_sel is not None:
-                opts = [
-                    (o.get_attribute("value") or o.inner_text() or "").strip()
-                    for o in date_filter_sel.locator("option").all()
-                ]
-                print(f"[GRID] Date Filter options: {opts}")
-                all_val = next((o for o in opts if o.upper() == "ALL" or o == ""), None)
-                if all_val is not None:
-                    date_filter_sel.select_option(all_val)
-                    page.wait_for_timeout(2500)
-                    print("[GRID] Selected 'ALL' years in Date Filter")
-                else:
-                    print("[GRID] 'ALL' option not found — proceeding with current filter")
+            if date_filter_sel is None:
+                print("[GRID] WARNING: Date Filter select not found — will collect only default view")
+                fy_list = [None]   # sentinel: run once without changing filter
             else:
-                print("[GRID] Date Filter select not found — proceeding with default view")
+                fy_list = fy_list  # iterate per FY year
 
-            # ── Step 2: Set 100 per page ────────────────────────────────────────
-            try:
-                per_page_sel = page.locator("select").filter(has_text="50")
-                if per_page_sel.count():
-                    per_page_sel.first.select_option("100")
-                    page.wait_for_timeout(2000)
-            except Exception:
-                pass
+            def _set_100_per_page():
+                try:
+                    per_page_sel = page.locator("select").filter(has_text="50")
+                    if per_page_sel.count():
+                        per_page_sel.first.select_option("100")
+                        page.wait_for_timeout(2000)
+                except Exception:
+                    pass
 
-            # ── Step 3: Paginate through all pages ──────────────────────────────
-            page_num = 1
-            while True:
-                found = _extract_xls_links(page)
-                new = {d: u for d, u in found.items() if d not in result}
-                result.update(new)
-                print(f"[GRID] Page {page_num}: {len(found)} XLS in range, {len(new)} new, total={len(result)}")
-
-                # Log visible buttons once for debugging next-page selector
-                if page_num == 1:
-                    btns = page.eval_on_selector_all("button", "els => els.map(e => e.textContent.trim())")
-                    print(f"[GRID] Buttons on page: {[b for b in btns if b][:15]}")
-
-                navigated = False
+            def _next_page():
+                """Click the '>' next-page button. Returns True if navigated."""
                 for selector in [
-                    "button:text-is('>')",            # exact match — confirmed Grid India ">" next-page button
-                    "button:has-text('>')",            # fallback substring match
-                    "button:text-is('›')",            # single angle quotation mark variant
+                    "button:text-is('>')",
+                    "button:has-text('>')",
+                    "button:text-is('›')",
                     "button:has-text('›')",
-                    "button[aria-label*='next' i]",   # aria-label containing 'next'
+                    "button[aria-label*='next' i]",
                     "[aria-label='Next page']",
                     ".pagination-next",
                     "li.next a",
@@ -312,15 +333,48 @@ def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
                         if btn.count() and btn.is_visible() and btn.is_enabled():
                             btn.click()
                             page.wait_for_timeout(2500)
-                            navigated = True
-                            page_num += 1
-                            break
+                            return True
                     except Exception:
                         continue
+                return False
 
-                if not navigated:
-                    print(f"[GRID] No more pages after page {page_num}")
-                    break
+            # ── Steps 2+3: For each FY, select it, set 100/page, paginate ───────
+            logged_buttons = False
+            for fy in fy_list:
+                if date_filter_sel is not None and fy is not None:
+                    # Select this financial year from the Date Filter
+                    match = next((o for o in all_opts if fy in o), None)
+                    if match is None:
+                        print(f"[GRID] FY '{fy}' not in dropdown options — skipping")
+                        continue
+                    print(f"[GRID] Selecting FY: {fy}")
+                    try:
+                        date_filter_sel.select_option(match)
+                        page.wait_for_timeout(2500)
+                    except Exception as e:
+                        print(f"[GRID] Could not select FY {fy}: {e}")
+                        continue
+
+                _set_100_per_page()
+
+                page_num = 1
+                while True:
+                    found = _extract_xls_links(page)
+                    new = {d: u for d, u in found.items() if d not in result}
+                    result.update(new)
+                    lbl = fy or "default"
+                    print(f"[GRID] FY={lbl} page {page_num}: {len(found)} in range, {len(new)} new, total={len(result)}")
+
+                    if not logged_buttons:
+                        btns = page.eval_on_selector_all("button", "els => els.map(e => e.textContent.trim())")
+                        print(f"[GRID] Buttons on page: {[b for b in btns if b][:15]}")
+                        logged_buttons = True
+
+                    if _next_page():
+                        page_num += 1
+                    else:
+                        print(f"[GRID] FY={lbl}: no more pages after page {page_num}")
+                        break
 
         except Exception as e:
             print(f"[GRID] _collect_all_excel_urls error: {e}")
@@ -567,26 +621,27 @@ def _parse_mop_e(ws: _SheetAdapter) -> dict:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def scrape_grid_india(target_date=None, excel_url=None) -> bool:
+def scrape_grid_india(target_date=None, excel_url=None, force=False) -> bool:
     """
     Returns True on success. Raises SystemExit(2) if Excel not yet published.
 
-    excel_url: optional pre-fetched URL (skips Playwright discovery when provided,
-               e.g. from _collect_all_excel_urls during backfill).
+    excel_url: optional pre-fetched URL (skips Playwright discovery).
+    force: skip the idempotency check (use during backfill for gap-filling).
     """
     if target_date is None:
         target_date = datetime.now(IST).date() - timedelta(days=1)
 
-    # Idempotency: check supply.csv as representative; all CSVs are written together
-    last = _last_date_in_csv(CSV_PATHS["supply"])
-    if last and last >= target_date:
-        # Also check solar-nonsolar separately (may lag if newly added)
-        last_sn = _last_date_in_csv(CSV_PATHS["demand_solar_nonsolar"])
-        if last_sn and last_sn >= target_date:
-            print(f"[GRID] Data for {target_date} already present in all CSVs. Skipping.")
-            return True
-        # Supply already written but solar-nonsolar missing — proceed to (re-)extract
-        print(f"[GRID] Supply up to date but solar-nonsolar CSV needs {target_date}. Proceeding.")
+    if not force:
+        # Idempotency: check supply.csv as representative; all CSVs are written together
+        last = _last_date_in_csv(CSV_PATHS["supply"])
+        if last and last >= target_date:
+            # Also check solar-nonsolar separately (may lag if newly added)
+            last_sn = _last_date_in_csv(CSV_PATHS["demand_solar_nonsolar"])
+            if last_sn and last_sn >= target_date:
+                print(f"[GRID] Data for {target_date} already present in all CSVs. Skipping.")
+                return True
+            # Supply already written but solar-nonsolar missing — proceed to (re-)extract
+            print(f"[GRID] Supply up to date but solar-nonsolar CSV needs {target_date}. Proceeding.")
 
 
     print(f"[GRID] Looking for Excel file for {target_date}...")
