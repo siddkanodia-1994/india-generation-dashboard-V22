@@ -252,6 +252,42 @@ def _open_sheet(excel_bytes: bytes, sheet_name: str):
 
 # ── Excel parsing helpers ──────────────────────────────────────────────────────
 
+def _find_row_in_col(ws: _SheetAdapter, keyword: str, col: int = 1, start: int = 1, max_scan: int = 200):
+    """
+    Like _find_row but searches an arbitrary column (1-indexed).
+    Useful for sections whose labels are not in column A.
+    """
+    kw = keyword.lower()
+    end = min(start + max_scan, ws.max_row + 1)
+    for r in range(start, end):
+        val = str(ws.cell(row=r, column=col).value or "").strip().lower()
+        if kw in val:
+            return r
+    return None
+
+
+def _excel_time_to_str(val) -> str:
+    """Convert an Excel time value to HH:MM string.
+    xlrd returns time as a float (fraction of day); openpyxl returns datetime.time.
+    Strings and None are handled gracefully.
+    """
+    if val is None:
+        return ""
+    # datetime.time from openpyxl
+    try:
+        import datetime as _dt
+        if isinstance(val, _dt.time):
+            return val.strftime("%H:%M")
+    except Exception:
+        pass
+    # float from xlrd: fraction of a 24-hour day
+    if isinstance(val, float) and 0.0 <= val <= 1.0:
+        total_min = int(round(val * 24 * 60))
+        h, m = divmod(total_min, 60)
+        return f"{h:02d}:{m:02d}"
+    return str(val).strip()
+
+
 def _find_row(ws: _SheetAdapter, keyword: str, start: int = 1, max_scan: int = 200):
     """
     Scan column A from start to start+max_scan for a cell whose string value
@@ -287,8 +323,9 @@ def _cell_float(ws: _SheetAdapter, row: int, col: int):
 def _parse_mop_e(ws: _SheetAdapter) -> dict:
     """
     Parse the MOP_E sheet and return a dict with keys:
-      supply_mu, peak_demand_gw, total_gen_mu, renewable_mu, thermal_mu
-    Missing values are None.
+      supply_mu, peak_demand_gw, total_gen_mu, renewable_mu, thermal_mu,
+      solar_peak_gw, solar_peak_time, nonsolar_peak_gw, nonsolar_peak_time
+    Missing values are absent from the dict.
     """
     result = {}
     H = 8  # column index for "All India" / Total column
@@ -353,6 +390,38 @@ def _parse_mop_e(ws: _SheetAdapter) -> dict:
         result["thermal_mu"] = round(result["total_gen_mu"] - result["renewable_mu"], 0)
         print(f"[GRID] Thermal (derived): {result['thermal_mu']} MU")
 
+    # ── Solar / Non-Solar Hour Peak Demand ────────────────────────────────────
+    # Section header is in col E (≈E92): "All India Peak Demand and shortage at Solar and Non-Solar Hour"
+    # Solar row ≈ E94 (keyword "solar hr"), Non-Solar row ≈ E95 (keyword "non solar hr")
+    # F col = Max Demand Met (MW), H col = time of peak
+    E = 5   # column E
+    F = 6   # column F — Max Demand Met (MW)
+    TH = 8  # column H — time of peak (reuse, distinct from H above)
+    section_row = _find_row_in_col(ws, "all india peak demand and shortage", col=E, start=80, max_scan=30)
+    if section_row:
+        solar_row    = _find_row_in_col(ws, "solar hr",      col=E, start=section_row + 1, max_scan=8)
+        nonsolar_row = _find_row_in_col(ws, "non-solar hr",  col=E, start=section_row + 1, max_scan=8)
+
+        if solar_row:
+            v = _cell_float(ws, solar_row, F)
+            if v is not None:
+                result["solar_peak_gw"] = round(v / 1000, 2)
+            result["solar_peak_time"] = _excel_time_to_str(ws.cell(row=solar_row, column=TH).value)
+            print(f"[GRID] Solar Peak (row {solar_row}): {result.get('solar_peak_gw')} GW @ {result.get('solar_peak_time')}")
+        else:
+            print("[GRID] WARNING: 'solar hr' row not found in col E")
+
+        if nonsolar_row:
+            v = _cell_float(ws, nonsolar_row, F)
+            if v is not None:
+                result["nonsolar_peak_gw"] = round(v / 1000, 2)
+            result["nonsolar_peak_time"] = _excel_time_to_str(ws.cell(row=nonsolar_row, column=TH).value)
+            print(f"[GRID] Non-Solar Peak (row {nonsolar_row}): {result.get('nonsolar_peak_gw')} GW @ {result.get('nonsolar_peak_time')}")
+        else:
+            print("[GRID] WARNING: 'non solar hr' row not found in col E")
+    else:
+        print("[GRID] WARNING: Solar/Non-Solar peak section not found in MOP_E col E")
+
     return result
 
 
@@ -365,11 +434,17 @@ def scrape_grid_india(target_date=None) -> bool:
     if target_date is None:
         target_date = datetime.now(IST).date() - timedelta(days=1)
 
-    # Idempotency check on supply.csv
+    # Idempotency: check supply.csv as representative; all CSVs are written together
     last = _last_date_in_csv(CSV_PATHS["supply"])
     if last and last >= target_date:
-        print(f"[GRID] Data for {target_date} already present. Skipping.")
-        return True
+        # Also check solar-nonsolar separately (may lag if newly added)
+        last_sn = _last_date_in_csv(CSV_PATHS["demand_solar_nonsolar"])
+        if last_sn and last_sn >= target_date:
+            print(f"[GRID] Data for {target_date} already present in all CSVs. Skipping.")
+            return True
+        # Supply already written but solar-nonsolar missing — proceed to (re-)extract
+        print(f"[GRID] Supply up to date but solar-nonsolar CSV needs {target_date}. Proceeding.")
+
 
     print(f"[GRID] Looking for Excel file for {target_date}...")
 
@@ -422,6 +497,24 @@ def scrape_grid_india(target_date=None) -> bool:
         wrote_any = True
     else:
         print("[GRID] WARNING: total_gen_mu missing — not writing to generation.csv")
+
+    # Write Peak Demand Solar-NonSolar.csv
+    if "solar_peak_gw" in data or "nonsolar_peak_gw" in data:
+        sn_path = CSV_PATHS["demand_solar_nonsolar"]
+        if not Path(sn_path).exists():
+            _append_csv(sn_path, ["date", "solar_gw", "solar_time", "nonsolar_gw", "nonsolar_time"])
+        _append_csv(sn_path, [
+            date_str,
+            data.get("solar_peak_gw", ""),
+            data.get("solar_peak_time", ""),
+            data.get("nonsolar_peak_gw", ""),
+            data.get("nonsolar_peak_time", ""),
+        ])
+        wrote_any = True
+        print(f"[GRID] Solar-NonSolar Peak: solar={data.get('solar_peak_gw')} GW, "
+              f"nonsolar={data.get('nonsolar_peak_gw')} GW")
+    else:
+        print("[GRID] WARNING: solar/nonsolar peak missing — not writing to Peak Demand Solar-NonSolar.csv")
 
     if wrote_any:
         print(f"[GRID] Done for {target_date}.")

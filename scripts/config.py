@@ -45,6 +45,7 @@ CSV_PATHS = {
     "dam":       os.path.join(BASE_DIR, "public", "data", "DAM Prices.csv"),
     "supply":    os.path.join(BASE_DIR, "public", "data", "supply.csv"),
     "demand":    os.path.join(BASE_DIR, "public", "data", "Peak Demand.csv"),
+    "demand_solar_nonsolar": os.path.join(BASE_DIR, "public", "data", "Peak Demand Solar-NonSolar.csv"),
     "generation":os.path.join(BASE_DIR, "public", "data", "generation.csv"),
     "coal_plf":  os.path.join(BASE_DIR, "public", "data", "Coal PLF.csv"),
     "capacity":  os.path.join(BASE_DIR, "public", "data", "capacity.csv"),

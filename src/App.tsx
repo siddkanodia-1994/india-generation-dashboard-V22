@@ -98,24 +98,77 @@ export default function App() {
           </TabPanel>
 
           {/* ===========================
-              Peak Demand Met
+              Peak Demand Met (WITH SUB-TABS)
               =========================== */}
           <TabPanel>
-            <ElectricityDashboard
-              type="demand"
-              title="India Peak Demand Met Dashboard"
-              subtitle="Daily peak demand met data (GW), trends, and YoY/MoM analytics"
-              seriesLabel="Peak Demand Met"
-              unitLabel="GW"
-              valueColumnKey="demand_gwh"
-              defaultCsvPath="/data/Peak Demand.csv"
-              enableAutoFetch={false}
-              calcMode="avg"
-              valueDisplay={{
-                suffix: " GW",
-                decimals: 2,
-              }}
-            />
+            <Tabs>
+              <div className="mt-2">
+                <TabList>
+                  <Tab>Peak Demand Met</Tab>
+                  <Tab>Solar Hours</Tab>
+                  <Tab>Non-Solar Hours</Tab>
+                </TabList>
+              </div>
+
+              {/* Main all-India peak demand (unchanged) */}
+              <TabPanel>
+                <ElectricityDashboard
+                  type="demand"
+                  title="India Peak Demand Met Dashboard"
+                  subtitle="Daily peak demand met data (GW), trends, and YoY/MoM analytics"
+                  seriesLabel="Peak Demand Met"
+                  unitLabel="GW"
+                  valueColumnKey="demand_gwh"
+                  defaultCsvPath="/data/Peak Demand.csv"
+                  enableAutoFetch={false}
+                  calcMode="avg"
+                  valueDisplay={{
+                    suffix: " GW",
+                    decimals: 2,
+                  }}
+                />
+              </TabPanel>
+
+              {/* Solar Hours peak demand */}
+              <TabPanel>
+                <ElectricityDashboard
+                  type="demand-solar"
+                  title="India Peak Demand - Solar Hours"
+                  subtitle="Peak demand during solar hours (8am–6pm), trends and YoY analytics"
+                  seriesLabel="Solar Hr Peak Demand"
+                  unitLabel="GW"
+                  valueColumnKey="solar_gw"
+                  defaultCsvPath="/data/Peak Demand Solar-NonSolar.csv"
+                  enableAutoFetch={false}
+                  calcMode="avg"
+                  valueDisplay={{
+                    suffix: " GW",
+                    decimals: 2,
+                  }}
+                  extraBadgeCols={[{ key: "solar_time", label: "Peak Time", isText: true }]}
+                />
+              </TabPanel>
+
+              {/* Non-Solar Hours peak demand */}
+              <TabPanel>
+                <ElectricityDashboard
+                  type="demand-nonsolar"
+                  title="India Peak Demand - Non-Solar Hours"
+                  subtitle="Peak demand during non-solar hours (6pm–8am), trends and YoY analytics"
+                  seriesLabel="Non-Solar Hr Peak Demand"
+                  unitLabel="GW"
+                  valueColumnKey="nonsolar_gw"
+                  defaultCsvPath="/data/Peak Demand Solar-NonSolar.csv"
+                  enableAutoFetch={false}
+                  calcMode="avg"
+                  valueDisplay={{
+                    suffix: " GW",
+                    decimals: 2,
+                  }}
+                  extraBadgeCols={[{ key: "nonsolar_time", label: "Peak Time", isText: true }]}
+                />
+              </TabPanel>
+            </Tabs>
           </TabPanel>
 
           {/* ===========================

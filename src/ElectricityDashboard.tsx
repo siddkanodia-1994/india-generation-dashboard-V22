@@ -627,7 +627,7 @@ export type ElectricityDashboardProps = {
   enableAutoFetch?: boolean;
   calcMode: "sum" | "avg";
   valueDisplay: { suffix: string; decimals: number };
-  extraBadgeCols?: { key: string; label: string }[];
+  extraBadgeCols?: { key: string; label: string; isText?: boolean }[];
 };
 
 // explicit view types
@@ -712,6 +712,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
 
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
   const [extraLatestValues, setExtraLatestValues] = useState<Map<string, number>>(new Map());
+  const [extraTextValues, setExtraTextValues] = useState<Map<string, string>>(new Map());
 
   const [fromIso, setFromIso] = useState("");
   const [toIso, setToIso] = useState("");
@@ -825,16 +826,36 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
 
         setDataMap(m);
 
-        // Parse extra badge columns (e.g. Solar_Avg, NonSolar_Avg) from the same CSV
+        // Parse extra badge columns from the same CSV
         if (extraBadgeCols?.length) {
           const extra = new Map<string, number>();
-          for (const { key } of extraBadgeCols) {
-            const { parsed: ep } = csvParse(text, key);
-            if (ep.length) {
-              extra.set(key, ep[ep.length - 1].value);
+          const textExtra = new Map<string, string>();
+
+          // Build header index from first non-empty line
+          const rawLines = text.split("\n").filter((l) => l.trim());
+          const headerCols = rawLines.length
+            ? rawLines[0].split(",").map((h) => h.trim())
+            : [];
+          const lastRawCols = rawLines.length
+            ? rawLines[rawLines.length - 1].split(",")
+            : [];
+
+          for (const { key, isText } of extraBadgeCols) {
+            if (isText) {
+              // Read raw string value from last data row
+              const ci = headerCols.indexOf(key);
+              if (ci >= 0 && lastRawCols[ci] != null) {
+                textExtra.set(key, lastRawCols[ci].trim());
+              }
+            } else {
+              const { parsed: ep } = csvParse(text, key);
+              if (ep.length) extra.set(key, ep[ep.length - 1].value);
             }
           }
-          if (!cancelled) setExtraLatestValues(extra);
+          if (!cancelled) {
+            setExtraLatestValues(extra);
+            setExtraTextValues(textExtra);
+          }
         }
 
         if (errs.length) {
@@ -1476,11 +1497,15 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                   <div className="text-xs text-slate-500">Avg · Rs/Unit</div>
                 </div>
               )}
-              {extraBadgeCols.map(({ key, label }) => {
-                const v = extraLatestValues.get(key);
+              {extraBadgeCols.map(({ key, label, isText }) => {
+                const display = isText
+                  ? (extraTextValues.get(key) ?? "—")
+                  : extraLatestValues.get(key) != null
+                    ? fmtValue(extraLatestValues.get(key)!)
+                    : "—";
                 return (
                   <div key={key} className="rounded-xl bg-white px-4 py-2 ring-1 ring-slate-200 text-center">
-                    <div className="text-lg font-bold text-slate-900">{v != null ? fmtValue(v) : "—"}</div>
+                    <div className="text-lg font-bold text-slate-900">{display}</div>
                     <div className="text-xs text-slate-500">{label}</div>
                   </div>
                 );
