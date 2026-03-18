@@ -152,7 +152,16 @@ def _find_excel_url(target_date: date):
                 page.wait_for_selector("a[href*='.xls']", timeout=20000)
             except Exception:
                 pass
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(1500)
+
+            # Switch to 100 per page so ~50 dates are visible in one load
+            try:
+                sel = page.locator("select").filter(has_text="50")
+                if sel.count():
+                    sel.first.select_option("100")
+                    page.wait_for_timeout(2000)
+            except Exception:
+                pass
 
             hrefs = page.eval_on_selector_all(
                 "a[href]",
