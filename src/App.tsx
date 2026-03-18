@@ -64,7 +64,7 @@ export default function App() {
                   type="generation-coal"
                   title="India Electricity Generation Dashboard"
                   subtitle="Daily generation data, trends, and YoY/MoM analytics"
-                  seriesLabel="Coal"
+                  seriesLabel="Thermal (incl. Large Hydro)"
                   unitLabel="MU"
                   valueColumnKey="coal"
                   defaultCsvPath="/data/generation.csv"
