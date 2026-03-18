@@ -193,8 +193,12 @@ def _find_excel_url(target_date: date):
 
 def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
     """
-    Single Playwright session that navigates all pages of Grid India PSP reports
-    and returns a {date: url} dict for all Excel files in [start_date, end_date].
+    Single Playwright session.
+    1. Navigate to Grid India PSP report page
+    2. Select "ALL" from the Date Filter dropdown (shows all financial years)
+    3. Set 100-per-page
+    4. Paginate through all pages, collecting .xls hrefs for dates in [start_date, end_date]
+    Returns {date: url}.
     """
     try:
         from playwright.sync_api import sync_playwright
@@ -204,7 +208,28 @@ def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
 
     result = {}
 
-    print(f"[GRID] Collecting all Excel URLs from {start_date} to {end_date}...")
+    def _extract_xls_links(pg):
+        hrefs = pg.eval_on_selector_all("a[href]", "els => els.map(e => e.getAttribute('href'))")
+        found = {}
+        for href in hrefs:
+            if not href:
+                continue
+            lower = href.lower()
+            if not (lower.endswith(".xls") or lower.endswith(".xlsx")):
+                continue
+            filename = href.rsplit("/", 1)[-1]
+            try:
+                prefix = filename.split("_")[0]   # "17.03.26"
+                day, mon, yr = prefix.split(".")
+                d = date(2000 + int(yr), int(mon), int(day))
+            except Exception:
+                continue
+            if start_date <= d <= end_date:
+                full = href if href.startswith("http") else GRID_INDIA_PDF_BASE + href
+                found[d] = full
+        return found
+
+    print(f"[GRID] Collecting Excel URLs {start_date} → {end_date} (ALL years)...")
     with sync_playwright() as pw:
         browser, context = _make_browser_context(pw)
         page = context.new_page()
@@ -220,83 +245,85 @@ def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
                 pass
             page.wait_for_timeout(1500)
 
-            # Switch to 100 per page
+            # ── Step 1: Select "ALL" from the Date Filter dropdown ──────────────
+            # The Date Filter select has FY-pattern options like "2022-23" (7 chars, hyphen at pos 4).
+            # "ALL" is the first option and shows all financial years at once.
+            date_filter_sel = None
+            for sel in page.locator("select").all():
+                opts = [
+                    (o.get_attribute("value") or o.inner_text() or "").strip()
+                    for o in sel.locator("option").all()
+                ]
+                if any(len(o) == 7 and o[4] == "-" for o in opts):
+                    date_filter_sel = sel
+                    break
+
+            if date_filter_sel is not None:
+                opts = [
+                    (o.get_attribute("value") or o.inner_text() or "").strip()
+                    for o in date_filter_sel.locator("option").all()
+                ]
+                print(f"[GRID] Date Filter options: {opts}")
+                all_val = next((o for o in opts if o.upper() == "ALL" or o == ""), None)
+                if all_val is not None:
+                    date_filter_sel.select_option(all_val)
+                    page.wait_for_timeout(2500)
+                    print("[GRID] Selected 'ALL' years in Date Filter")
+                else:
+                    print("[GRID] 'ALL' option not found — proceeding with current filter")
+            else:
+                print("[GRID] Date Filter select not found — proceeding with default view")
+
+            # ── Step 2: Set 100 per page ────────────────────────────────────────
             try:
-                sel = page.locator("select").filter(has_text="50")
-                if sel.count():
-                    sel.first.select_option("100")
+                per_page_sel = page.locator("select").filter(has_text="50")
+                if per_page_sel.count():
+                    per_page_sel.first.select_option("100")
                     page.wait_for_timeout(2000)
             except Exception:
                 pass
 
+            # ── Step 3: Paginate through all pages ──────────────────────────────
             page_num = 1
             while True:
-                hrefs = page.eval_on_selector_all(
-                    "a[href]",
-                    "els => els.map(e => e.getAttribute('href'))"
-                )
-                found_this_page = 0
-                for href in hrefs:
-                    if not href:
-                        continue
-                    lower = href.lower()
-                    if not (lower.endswith(".xls") or lower.endswith(".xlsx")):
-                        continue
-                    filename = href.rsplit("/", 1)[-1]
-                    # Filename prefix: DD.MM.YY  e.g. "17.03.26_NLDC_PSP_..."
+                found = _extract_xls_links(page)
+                new = {d: u for d, u in found.items() if d not in result}
+                result.update(new)
+                print(f"[GRID] Page {page_num}: {len(found)} XLS in range, {len(new)} new, total={len(result)}")
+
+                # Log visible buttons once for debugging next-page selector
+                if page_num == 1:
+                    btns = page.eval_on_selector_all("button", "els => els.map(e => e.textContent.trim())")
+                    print(f"[GRID] Buttons on page: {[b for b in btns if b][:15]}")
+
+                navigated = False
+                for selector in [
+                    "button:has-text('Next')",
+                    "button:has-text('>')",
+                    "button:has-text('›')",
+                    "button:has-text('»')",
+                    "[aria-label='Next page']",
+                    "[aria-label='next']",
+                    ".pagination-next",
+                    "li.next a",
+                ]:
                     try:
-                        prefix = filename.split("_")[0]
-                        day, mon, yr = prefix.split(".")
-                        yr_full = 2000 + int(yr)
-                        d = date(yr_full, int(mon), int(day))
+                        btn = page.locator(selector).first
+                        if btn.count() and btn.is_visible() and btn.is_enabled():
+                            btn.click()
+                            page.wait_for_timeout(2500)
+                            navigated = True
+                            page_num += 1
+                            break
                     except Exception:
                         continue
-                    if start_date <= d <= end_date:
-                        full = href if href.startswith("http") else GRID_INDIA_PDF_BASE + href
-                        if d not in result:
-                            result[d] = full
-                            found_this_page += 1
-
-                print(f"[GRID] Page {page_num}: found {found_this_page} new URLs in range ({len(result)} total so far)")
-
-                # Try to navigate to next page
-                navigated = False
-                try:
-                    # Log available buttons on first page for debugging
-                    if page_num == 1:
-                        btns = page.eval_on_selector_all("button", "els => els.map(e => e.textContent.trim())")
-                        print(f"[GRID] Pagination buttons visible: {btns[:10]}")
-
-                    # Try common next-page selectors
-                    for selector in [
-                        "button:has-text('Next')",
-                        "button:has-text('>')",
-                        "button:has-text('›')",
-                        "button:has-text('»')",
-                        "[aria-label='Next page']",
-                        "[aria-label='next']",
-                        ".pagination-next",
-                        "li.next a",
-                    ]:
-                        try:
-                            btn = page.locator(selector).first
-                            if btn.count() and btn.is_visible() and btn.is_enabled():
-                                btn.click()
-                                page.wait_for_timeout(2500)
-                                navigated = True
-                                page_num += 1
-                                break
-                        except Exception:
-                            continue
-                except Exception as e:
-                    print(f"[GRID] Pagination error: {e}")
 
                 if not navigated:
-                    print(f"[GRID] No more pages found after page {page_num}.")
+                    print(f"[GRID] No more pages after page {page_num}")
                     break
 
         except Exception as e:
-            print(f"[GRID] _collect_all_excel_urls failed: {e}")
+            print(f"[GRID] _collect_all_excel_urls error: {e}")
         finally:
             browser.close()
 
