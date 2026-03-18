@@ -1,47 +1,53 @@
 """
-Scrape Grid India Daily PSP Report (PDF) and append to:
-  - supply.csv        : Total energy met (MU)
-  - Peak Demand.csv   : Peak demand met (GW)
-  - generation.csv    : Total generation, Thermal (coal), Renewable (solar+wind)
+Scrape Grid India Daily PSP Report (Excel) and append to:
+  - supply.csv        : Total energy met (MU)      — MOP_E!H8  (row: "Energy Met (MU)")
+  - Peak Demand.csv   : Peak demand met (GW)        — MOP_E!H13 (row: "Maximum Demand Met…"), /1000
+  - generation.csv    : Total generation, Thermal (derived), Renewable — MOP_E section G
 
-The PSP PDF is published on grid-india.in for the *previous* day.
-This script is designed to be run multiple times (idempotent) between 9am–11am IST
-until the PDF becomes available. It exits with code 0 on success OR if data already
-present; exits with code 2 if PDF not yet published (so workflow can retry).
+The Excel file is published on grid-india.in for the *previous* day.
+The DATA date is embedded in the Excel filename (not the upload/listing date).
+
+Run pattern: idempotent, exits 0 on success OR if data already present, exits 2 if Excel
+not yet published (GitHub Actions workflow retries every 30 min from 9am–11am IST).
+
+Usage:
+  python scrape_grid_india.py                  # yesterday (IST)
+  python scrape_grid_india.py --date 2026-03-17
 """
 
+import argparse
 import csv
 import io
-import re
 import sys
-import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
-from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).parent))
 from config import CSV_PATHS, GRID_INDIA_REPORTS_URL, GRID_INDIA_PDF_BASE
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
 HEADERS = {
     "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9",
 }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── CSV helpers ────────────────────────────────────────────────────────────────
 
-def _last_date_in_csv(path: str) -> date | None:
+def _last_date_in_csv(path: str):
     p = Path(path)
     if not p.exists():
         return None
     with open(p, newline="") as f:
         rows = list(csv.reader(f))
-    data_rows = [r for r in rows if r and not r[0].startswith("Date")]
+    data_rows = [r for r in rows if r and not r[0].strip().lower().startswith("date")]
     if not data_rows:
         return None
     last = data_rows[-1][0].strip()
@@ -59,52 +65,121 @@ def _format_date(d: date) -> str:
     return d.strftime("%d/%m/%y")
 
 
-# ── PDF discovery ─────────────────────────────────────────────────────────────
+def _append_csv(path: str, row: list) -> None:
+    with open(path, "a", newline="") as f:
+        csv.writer(f).writerow(row)
 
-def _find_pdf_url(target_date: date) -> str | None:
-    """
-    Search the Grid India reports page for the PSP PDF link for target_date.
-    Returns the full URL or None.
-    """
-    # Common filename patterns:
-    #   PSP_15_03_2026.pdf  /  Daily_PSP_Report_15032026.pdf  /  PSP15032026.pdf
-    date_variants = [
-        target_date.strftime("%d_%m_%Y"),     # 15_03_2026
-        target_date.strftime("%d%m%Y"),        # 15032026
-        target_date.strftime("%d-%m-%Y"),      # 15-03-2026
-        target_date.strftime("%d.%m.%Y"),      # 15.03.2026
+
+# ── Excel URL discovery via Playwright ────────────────────────────────────────
+
+def _make_browser_context(pw):
+    browser = pw.chromium.launch(
+        headless=True,
+        args=[
+            "--no-sandbox",
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--window-size=1280,800",
+        ],
+    )
+    context = browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1280, "height": 800},
+        locale="en-IN",
+        java_script_enabled=True,
+    )
+    context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'plugins',   {get: () => [1, 2, 3]});
+        Object.defineProperty(navigator, 'languages', {get: () => ['en-IN', 'en']});
+    """)
+    return browser, context
+
+
+def _date_variants(d: date) -> list:
+    return [
+        d.strftime("%d_%m_%Y"),   # 17_03_2026
+        d.strftime("%d%m%Y"),     # 17032026
+        d.strftime("%d-%m-%Y"),   # 17-03-2026
+        d.strftime("%d.%m.%Y"),   # 17.03.2026
+        d.strftime("%d_%m_%y"),   # 17_03_26
+        d.strftime("%d%m%y"),     # 170326
     ]
 
+
+def _find_excel_url(target_date: date):
+    """
+    Use Playwright to render the Grid India Daily PSP Report page and find
+    the Excel download link for target_date. Returns full URL or None.
+    """
     try:
-        r = requests.get(GRID_INDIA_REPORTS_URL, headers=HEADERS, timeout=20)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"[GRID] Failed to load reports page: {e}")
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[GRID] Playwright not installed.")
         return None
 
-    soup = BeautifulSoup(r.text, "lxml")
-    links = soup.find_all("a", href=True)
+    variants = _date_variants(target_date)
 
-    for link in links:
-        href: str = link["href"]
+    print(f"[GRID] Loading page: {GRID_INDIA_REPORTS_URL}")
+    with sync_playwright() as pw:
+        browser, context = _make_browser_context(pw)
+        page = context.new_page()
+        try:
+            page.goto(GRID_INDIA_REPORTS_URL, wait_until="domcontentloaded", timeout=60000)
+            # Wait for network to settle (React hydration)
+            try:
+                page.wait_for_load_state("networkidle", timeout=20000)
+            except Exception:
+                pass
+            # Try to wait for any Excel/xls links to appear
+            try:
+                page.wait_for_selector("a[href*='.xls']", timeout=20000)
+            except Exception:
+                pass
+            page.wait_for_timeout(2000)
+
+            # Extract all hrefs from rendered DOM
+            hrefs = page.eval_on_selector_all(
+                "a[href]",
+                "els => els.map(e => e.getAttribute('href'))"
+            )
+            print(f"[GRID] Found {len(hrefs)} links on rendered page")
+        except Exception as e:
+            print(f"[GRID] Playwright page load failed: {e}")
+            hrefs = []
+        finally:
+            browser.close()
+
+    # Filter for Excel links matching the target date
+    for href in hrefs:
+        if not href:
+            continue
         lower = href.lower()
-        if "psp" in lower and href.endswith(".pdf"):
-            for variant in date_variants:
-                if variant in href or variant.replace("_", "") in href:
-                    if href.startswith("http"):
-                        return href
-                    return GRID_INDIA_PDF_BASE + href
+        if not (lower.endswith(".xlsx") or lower.endswith(".xls")):
+            continue
+        for v in variants:
+            if v in href:
+                full = href if href.startswith("http") else GRID_INDIA_PDF_BASE + href
+                print(f"[GRID] Found Excel: {full}")
+                return full
 
-    # Fallback: try common URL patterns directly
+    # Fallback: try common direct URL patterns (may work even on SPA sites)
+    print("[GRID] No Excel link found in rendered DOM, trying direct URL patterns...")
     for pattern in [
-        f"/NLDC/NLDC_Daily_Report/PSP_{target_date.strftime('%d_%m_%Y')}.pdf",
-        f"/uploads/PSP_{target_date.strftime('%d_%m_%Y')}.pdf",
-        f"/reports/PSP_{target_date.strftime('%d%m%Y')}.pdf",
+        f"/NLDC/NLDC_Daily_Report/PSP_{target_date.strftime('%d_%m_%Y')}.xlsx",
+        f"/uploads/PSP_{target_date.strftime('%d_%m_%Y')}.xlsx",
+        f"/reports/daily-psp-report/PSP_{target_date.strftime('%d_%m_%Y')}.xlsx",
+        f"/assets/PSP_{target_date.strftime('%d_%m_%Y')}.xlsx",
     ]:
         url = GRID_INDIA_PDF_BASE + pattern
         try:
             resp = requests.head(url, headers=HEADERS, timeout=10, allow_redirects=True)
             if resp.status_code == 200:
+                print(f"[GRID] Direct URL found: {url}")
                 return url
         except Exception:
             continue
@@ -112,213 +187,206 @@ def _find_pdf_url(target_date: date) -> str | None:
     return None
 
 
-# ── PDF parsing ───────────────────────────────────────────────────────────────
+# ── Excel parsing helpers ──────────────────────────────────────────────────────
 
-def _parse_psp_pdf(pdf_bytes: bytes) -> dict | None:
+def _find_row(ws, keyword: str, start: int = 1, max_scan: int = 200):
     """
-    Parse the PSP PDF and extract:
-      - peak_demand_gw    : peak demand met (GW)
-      - total_energy_mu   : total energy met / supply (MU)
-      - total_generation  : total generation (MU)
-      - thermal_generation: thermal/coal generation (MU)
-      - renewable_generation: solar + wind generation (MU)
+    Scan column A from start to start+max_scan for a cell whose string value
+    contains keyword (case-insensitive). Returns the row number or None.
+    """
+    kw = keyword.lower()
+    end = min(start + max_scan, ws.max_row + 1)
+    for r in range(start, end):
+        cell = ws.cell(row=r, column=1)
+        val = str(cell.value or "").strip().lower()
+        if kw in val:
+            return r
+    return None
 
-    Returns a dict or None if parsing fails.
+
+def _find_row_after(ws, keyword: str, start: int, max_scan: int = 20):
     """
+    Like _find_row but starts at start+1 (for anchored section searches).
+    """
+    return _find_row(ws, keyword, start=start + 1, max_scan=max_scan)
+
+
+def _cell_float(ws, row: int, col: int):
+    """Return float value of cell or None."""
+    if row is None:
+        return None
     try:
-        import pdfplumber
-    except ImportError:
-        print("[GRID] pdfplumber not installed. Run: pip install pdfplumber")
+        v = ws.cell(row=row, column=col).value
+        if v is None:
+            return None
+        return float(str(v).replace(",", "").strip())
+    except (ValueError, TypeError):
         return None
 
+
+def _parse_mop_e(wb) -> dict:
+    """
+    Parse the MOP_E sheet and return a dict with keys:
+      supply_mu, peak_demand_gw, total_gen_mu, renewable_mu, thermal_mu
+    Missing values are None.
+    """
     result = {}
 
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        full_text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    if "MOP_E" not in wb.sheetnames:
+        print(f"[GRID] Sheet 'MOP_E' not found. Available: {wb.sheetnames}")
+        return result
 
-    # ── Peak Demand ────────────────────────────────────────────────────────
-    # Pattern: "Peak Demand Met: 195.23 GW" or "Peak Demand  195.23"
-    peak_patterns = [
-        r"Peak\s+Demand\s+Met[:\s]+(\d+[\.,]\d+)\s*GW",
-        r"Peak\s+Demand[:\s]+(\d+[\.,]\d+)\s*GW",
-        r"Peak\s+Demand\s+Met\s*\(GW\)[:\s]+(\d+[\.,]\d+)",
-        r"Max\s+Demand\s+Met[:\s]+(\d+[\.,]\d+)",
-    ]
-    for pat in peak_patterns:
-        m = re.search(pat, full_text, re.IGNORECASE)
-        if m:
-            result["peak_demand_gw"] = round(float(m.group(1).replace(",", ".")), 2)
-            break
+    ws = wb["MOP_E"]
+    H = 8  # column index for "All India" / Total column
 
-    # ── Total Energy Met (Supply) ──────────────────────────────────────────
-    # Pattern: "Energy Met: 5432.10 MU" or "Total Energy Met  5432 MU"
-    supply_patterns = [
-        r"(?:Total\s+)?Energy\s+Met[:\s]+(\d[\d,]+\.?\d*)\s*MU",
-        r"Energy\s+Supplied[:\s]+(\d[\d,]+\.?\d*)\s*MU",
-        r"Total\s+Demand\s+Met[:\s]+(\d[\d,]+\.?\d*)\s*MU",
-    ]
-    for pat in supply_patterns:
-        m = re.search(pat, full_text, re.IGNORECASE)
-        if m:
-            result["total_energy_mu"] = round(float(m.group(1).replace(",", "")), 0)
-            break
+    # ── Supply (Energy Met MU) ────────────────────────────────────────────────
+    r = _find_row(ws, "energy met")
+    if r:
+        v = _cell_float(ws, r, H)
+        if v is not None:
+            result["supply_mu"] = round(v, 0)
+            print(f"[GRID] Supply (row {r}): {result['supply_mu']} MU")
+        else:
+            print(f"[GRID] WARNING: 'Energy Met' found at row {r} but H{r} is empty/non-numeric")
+    else:
+        print("[GRID] WARNING: 'Energy Met' header not found in MOP_E column A")
 
-    # ── Generation breakdown ───────────────────────────────────────────────
-    # Try to find a table with generation by source
-    thermal_mu = None
-    solar_mu = None
-    wind_mu = None
-    total_gen_mu = None
+    # ── Peak Demand (MW → GW) ─────────────────────────────────────────────────
+    r = _find_row(ws, "maximum demand met")
+    if r:
+        v = _cell_float(ws, r, H)
+        if v is not None:
+            result["peak_demand_gw"] = round(v / 1000, 2)
+            print(f"[GRID] Peak Demand (row {r}): {v} MW → {result['peak_demand_gw']} GW")
+        else:
+            print(f"[GRID] WARNING: 'Maximum Demand Met' found at row {r} but H{r} is empty")
+    else:
+        print("[GRID] WARNING: 'Maximum Demand Met' header not found in MOP_E column A")
 
-    # Pattern: "Thermal   XXXX" in table rows
-    thermal_patterns = [
-        r"(?:Thermal|Coal)[:\s]+(\d[\d,]+\.?\d*)\s*MU",
-        r"Thermal\s+Generation[:\s]+(\d[\d,]+\.?\d*)",
-        r"Thermal\s+(\d[\d,]+\.?\d*)\s+\d",  # table row
-    ]
-    for pat in thermal_patterns:
-        m = re.search(pat, full_text, re.IGNORECASE)
-        if m:
-            thermal_mu = round(float(m.group(1).replace(",", "")), 0)
-            break
+    # ── Total Generation ──────────────────────────────────────────────────────
+    # Anchored: find the section header first, then "Total" within 20 rows
+    section_row = _find_row(ws, "G. Sourcewise generation (Gross)")
+    if section_row is None:
+        section_row = _find_row(ws, "Sourcewise generation")  # fallback partial
+    if section_row:
+        total_row = _find_row_after(ws, "Total", start=section_row, max_scan=20)
+        if total_row:
+            v = _cell_float(ws, total_row, H)
+            if v is not None:
+                result["total_gen_mu"] = round(v, 0)
+                print(f"[GRID] Total Generation (row {total_row}): {result['total_gen_mu']} MU")
+            else:
+                print(f"[GRID] WARNING: Total row {total_row} found but H value is empty")
+        else:
+            print(f"[GRID] WARNING: 'Total' not found within 20 rows of section row {section_row}")
+    else:
+        print("[GRID] WARNING: 'G. Sourcewise generation' section not found")
 
-    solar_patterns = [
-        r"Solar[:\s]+(\d[\d,]+\.?\d*)\s*MU",
-        r"Solar\s+(\d[\d,]+\.?\d*)\s+\d",
-    ]
-    for pat in solar_patterns:
-        m = re.search(pat, full_text, re.IGNORECASE)
-        if m:
-            solar_mu = round(float(m.group(1).replace(",", "")), 0)
-            break
+    # ── Renewable (RES) ───────────────────────────────────────────────────────
+    r = _find_row(ws, "RES (Wind, Solar, Biomass")
+    if r:
+        v = _cell_float(ws, r, H)
+        if v is not None:
+            result["renewable_mu"] = round(v, 0)
+            print(f"[GRID] Renewable (row {r}): {result['renewable_mu']} MU")
+        else:
+            print(f"[GRID] WARNING: RES row {r} found but H value is empty")
+    else:
+        print("[GRID] WARNING: 'RES (Wind, Solar, Biomass' row not found in MOP_E")
 
-    wind_patterns = [
-        r"Wind[:\s]+(\d[\d,]+\.?\d*)\s*MU",
-        r"Wind\s+(\d[\d,]+\.?\d*)\s+\d",
-    ]
-    for pat in wind_patterns:
-        m = re.search(pat, full_text, re.IGNORECASE)
-        if m:
-            wind_mu = round(float(m.group(1).replace(",", "")), 0)
-            break
-
-    total_patterns = [
-        r"Total\s+Generation[:\s]+(\d[\d,]+\.?\d*)\s*MU",
-        r"Total\s+Gen[:\s]+(\d[\d,]+\.?\d*)",
-    ]
-    for pat in total_patterns:
-        m = re.search(pat, full_text, re.IGNORECASE)
-        if m:
-            total_gen_mu = round(float(m.group(1).replace(",", "")), 0)
-            break
-
-    # Derive total generation from supply if not found directly
-    if total_gen_mu is None and result.get("total_energy_mu"):
-        total_gen_mu = result["total_energy_mu"]
-
-    # Derive renewable from solar + wind
-    renewable_mu = None
-    if solar_mu is not None and wind_mu is not None:
-        renewable_mu = solar_mu + wind_mu
-    elif solar_mu is not None:
-        renewable_mu = solar_mu
-    elif wind_mu is not None:
-        renewable_mu = wind_mu
-
-    # If thermal not found but total and renewable are, derive thermal
-    if thermal_mu is None and total_gen_mu and renewable_mu:
-        thermal_mu = total_gen_mu - renewable_mu
-
-    if total_gen_mu:
-        result["total_generation"] = total_gen_mu
-    if thermal_mu:
-        result["thermal_generation"] = thermal_mu
-    if renewable_mu:
-        result["renewable_generation"] = renewable_mu
-
-    if not result:
-        print("[GRID] WARNING: Could not extract any values from PDF.")
-        print("[GRID] Full text preview:\n", full_text[:2000])
-        return None
+    # ── Thermal = Total − Renewable (derived, balancing figure) ──────────────
+    if "total_gen_mu" in result and "renewable_mu" in result:
+        result["thermal_mu"] = round(result["total_gen_mu"] - result["renewable_mu"], 0)
+        print(f"[GRID] Thermal (derived): {result['thermal_mu']} MU")
 
     return result
 
 
-# ── CSV writers ───────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
-def _append_csv(path: str, row: list) -> None:
-    with open(path, "a", newline="") as f:
-        csv.writer(f).writerow(row)
-
-
-# ── Main logic ────────────────────────────────────────────────────────────────
-
-def scrape_grid_india(target_date: date | None = None) -> bool:
+def scrape_grid_india(target_date=None) -> bool:
     """
-    Returns True on success, False on hard failure.
-    Raises SystemExit(2) if PDF not yet published (retry signal).
+    Returns True on success. Raises SystemExit(2) if Excel not yet published.
     """
     if target_date is None:
-        # PSP report covers the previous calendar day
-        target_date = date.today() - timedelta(days=1)
+        target_date = datetime.now(IST).date() - timedelta(days=1)
 
-    # Idempotency: check supply.csv (representative)
+    # Idempotency check on supply.csv
     last = _last_date_in_csv(CSV_PATHS["supply"])
     if last and last >= target_date:
         print(f"[GRID] Data for {target_date} already present. Skipping.")
         return True
 
-    print(f"[GRID] Looking for PSP PDF for {target_date}...")
+    print(f"[GRID] Looking for Excel file for {target_date}...")
 
-    pdf_url = _find_pdf_url(target_date)
-    if pdf_url is None:
-        print(f"[GRID] PDF not yet available for {target_date}. Will retry.")
-        sys.exit(2)  # Signals "not ready yet" to GitHub Actions
+    excel_url = _find_excel_url(target_date)
+    if excel_url is None:
+        print(f"[GRID] Excel not yet available for {target_date}. Will retry.")
+        sys.exit(2)  # GitHub Actions retry signal
 
-    print(f"[GRID] Found PDF: {pdf_url}")
-
+    print(f"[GRID] Downloading: {excel_url}")
     try:
-        r = requests.get(pdf_url, headers=HEADERS, timeout=60)
+        r = requests.get(excel_url, headers=HEADERS, timeout=60)
         r.raise_for_status()
-        pdf_bytes = r.content
+        excel_bytes = r.content
     except Exception as e:
-        print(f"[GRID] Failed to download PDF: {e}")
+        print(f"[GRID] Failed to download Excel: {e}")
         return False
 
-    data = _parse_psp_pdf(pdf_bytes)
-    if data is None:
-        print("[GRID] ERROR: PDF parsing returned no data.")
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(excel_bytes), data_only=True)
+    except Exception as e:
+        print(f"[GRID] Failed to open workbook: {e}")
+        return False
+
+    data = _parse_mop_e(wb)
+    if not data:
+        print("[GRID] ERROR: Could not extract any data from MOP_E sheet.")
         return False
 
     date_str = _format_date(target_date)
+    wrote_any = False
 
     # Write supply.csv
-    if "total_energy_mu" in data:
-        _append_csv(CSV_PATHS["supply"], [date_str, data["total_energy_mu"]])
-        print(f"[GRID] Supply: {data['total_energy_mu']} MU")
+    if "supply_mu" in data:
+        _append_csv(CSV_PATHS["supply"], [date_str, data["supply_mu"]])
+        wrote_any = True
     else:
-        print("[GRID] WARNING: total_energy_mu not found.")
+        print("[GRID] WARNING: supply_mu missing — not writing to supply.csv")
 
     # Write Peak Demand.csv
     if "peak_demand_gw" in data:
         _append_csv(CSV_PATHS["demand"], [date_str, data["peak_demand_gw"]])
-        print(f"[GRID] Peak Demand: {data['peak_demand_gw']} GW")
+        wrote_any = True
     else:
-        print("[GRID] WARNING: peak_demand_gw not found.")
+        print("[GRID] WARNING: peak_demand_gw missing — not writing to Peak Demand.csv")
 
-    # Write generation.csv (Date, Total, Thermal/Coal, Renewable)
-    if "total_generation" in data:
-        thermal  = data.get("thermal_generation", "")
-        renewabl = data.get("renewable_generation", "")
-        _append_csv(CSV_PATHS["generation"], [date_str, data["total_generation"], thermal, renewabl])
-        print(f"[GRID] Generation: total={data['total_generation']}, thermal={thermal}, renewable={renewabl}")
+    # Write generation.csv (Date, Total, Coal/Thermal, Renewable)
+    if "total_gen_mu" in data:
+        thermal  = data.get("thermal_mu", "")
+        renewabl = data.get("renewable_mu", "")
+        _append_csv(CSV_PATHS["generation"], [date_str, data["total_gen_mu"], thermal, renewabl])
+        wrote_any = True
     else:
-        print("[GRID] WARNING: total_generation not found.")
+        print("[GRID] WARNING: total_gen_mu missing — not writing to generation.csv")
 
-    print(f"[GRID] Done for {target_date}.")
-    return True
+    if wrote_any:
+        print(f"[GRID] Done for {target_date}.")
+        return True
+
+    print("[GRID] ERROR: No CSV rows written.")
+    return False
 
 
 if __name__ == "__main__":
-    success = scrape_grid_india()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", help="Target date YYYY-MM-DD (default: yesterday IST)")
+    args = parser.parse_args()
+
+    target = None
+    if args.date:
+        target = date.fromisoformat(args.date)
+
+    success = scrape_grid_india(target)
     sys.exit(0 if success else 1)
