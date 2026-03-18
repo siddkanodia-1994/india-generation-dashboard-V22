@@ -630,6 +630,7 @@ export type ElectricityDashboardProps = {
   extraBadgeCols?: { key: string; label: string; isText?: boolean }[];
   extraBadgeCsvPath?: string;
   hideMainBadge?: boolean;
+  showYoyBadge?: boolean;
 };
 
 // explicit view types
@@ -657,6 +658,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     extraBadgeCols,
     extraBadgeCsvPath,
     hideMainBadge,
+    showYoyBadge,
   } = props;
 
   const STORAGE_KEY = `tusk_india_${type}_v1`;
@@ -1580,6 +1582,14 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                   </div>
                 );
               })}
+              {showYoyBadge && kpis.latestYoY != null && (
+                <div className="rounded-xl bg-white px-4 py-2 ring-1 ring-slate-200 text-center">
+                  <div className={`text-lg font-bold ${kpis.latestYoY >= 0 ? "text-emerald-600" : "text-red-500"}`}>
+                    {fmtPct(kpis.latestYoY)}
+                  </div>
+                  <div className="text-xs text-slate-500">YoY (same day)</div>
+                </div>
+              )}
               {kpis.latest && (
                 <div className="text-xs text-slate-400 self-end pb-1">
                   {formatDDMMYYYY(kpis.latest.date)}
