@@ -126,6 +126,12 @@ export default function App() {
                     suffix: " GW",
                     decimals: 2,
                   }}
+                  extraBadgeCsvPath="/data/Peak Demand Solar-NonSolar.csv"
+                  hideMainBadge={true}
+                  extraBadgeCols={[
+                    { key: "solar_gw",    label: "☀ Solar Peak · GW" },
+                    { key: "nonsolar_gw", label: "◑ Non-Solar Peak · GW" },
+                  ]}
                 />
               </TabPanel>
 

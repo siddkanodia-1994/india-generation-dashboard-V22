@@ -628,6 +628,8 @@ export type ElectricityDashboardProps = {
   calcMode: "sum" | "avg";
   valueDisplay: { suffix: string; decimals: number };
   extraBadgeCols?: { key: string; label: string; isText?: boolean }[];
+  extraBadgeCsvPath?: string;
+  hideMainBadge?: boolean;
 };
 
 // explicit view types
@@ -653,6 +655,8 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     calcMode,
     valueDisplay,
     extraBadgeCols,
+    extraBadgeCsvPath,
+    hideMainBadge,
   } = props;
 
   const STORAGE_KEY = `tusk_india_${type}_v1`;
@@ -713,6 +717,8 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
   const [extraLatestValues, setExtraLatestValues] = useState<Map<string, number>>(new Map());
   const [extraTextValues, setExtraTextValues] = useState<Map<string, string>>(new Map());
+  const [extraBadgeLatestValues, setExtraBadgeLatestValues] = useState<Map<string, number>>(new Map());
+  const [extraBadgeTextValues, setExtraBadgeTextValues] = useState<Map<string, string>>(new Map());
   const [textByDate, setTextByDate] = useState<Map<string, Map<string, string>>>(new Map());
 
   const [fromIso, setFromIso] = useState("");
@@ -903,6 +909,40 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
       cancelled = true;
     };
   }, [defaultCsvPath, type, valueColumnKey]);
+
+  // Secondary badge CSV fetch — reads last row from a different CSV than the main data
+  useEffect(() => {
+    if (!extraBadgeCsvPath || !extraBadgeCols?.length) return;
+    let cancelled = false;
+    fetch(extraBadgeCsvPath)
+      .then((r) => r.text())
+      .then((text) => {
+        if (cancelled) return;
+        const rawLines = text.split("\n").filter((l) => l.trim());
+        if (!rawLines.length) return;
+        const headerCols = rawLines[0].split(",").map((c) => c.trim().toLowerCase());
+        const lastLine = rawLines[rawLines.length - 1].split(",");
+        const latestVals = new Map<string, number>();
+        const textVals = new Map<string, string>();
+        for (const { key, isText } of extraBadgeCols) {
+          const ci = headerCols.indexOf(key.toLowerCase());
+          if (ci < 0) continue;
+          const raw = lastLine[ci]?.trim() ?? "";
+          if (isText) {
+            textVals.set(key, raw);
+          } else {
+            const n = parseFloat(raw);
+            if (!isNaN(n)) latestVals.set(key, n);
+          }
+        }
+        setExtraBadgeLatestValues(latestVals);
+        setExtraBadgeTextValues(textVals);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [extraBadgeCsvPath]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const obj = Object.fromEntries(dataMap.entries());
@@ -1519,17 +1559,19 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
 
           {extraBadgeCols !== undefined ? (
             <div className="flex flex-wrap items-center gap-2">
-              {kpis.latest && (
+              {!hideMainBadge && kpis.latest && (
                 <div className="rounded-xl bg-white px-4 py-2 ring-1 ring-slate-200 text-center">
                   <div className="text-lg font-bold text-slate-900">{fmtValue(kpis.latest.value)}</div>
                   <div className="text-xs text-slate-500">Avg · {unitLabel}</div>
                 </div>
               )}
               {extraBadgeCols.map(({ key, label, isText }) => {
+                const numericMap = extraBadgeCsvPath ? extraBadgeLatestValues : extraLatestValues;
+                const textMap = extraBadgeCsvPath ? extraBadgeTextValues : extraTextValues;
                 const display = isText
-                  ? (extraTextValues.get(key) ?? "—")
-                  : extraLatestValues.get(key) != null
-                    ? fmtValue(extraLatestValues.get(key)!)
+                  ? (textMap.get(key) ?? "—")
+                  : numericMap.get(key) != null
+                    ? fmtValue(numericMap.get(key)!)
                     : "—";
                 return (
                   <div key={key} className="rounded-xl bg-white px-4 py-2 ring-1 ring-slate-200 text-center">
