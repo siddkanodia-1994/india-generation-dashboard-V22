@@ -7,14 +7,16 @@ import RTMVsStocksDailyCard from "./RTMVsStocksDailyCard";
 import RatedCapacity from "./RatedCapacity";
 import LatestNews from "./LatestNews";
 import LatestReports from "./LatestReports";
+import SummaryCard from "./SummaryCard";
 
 export default function App() {
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="mx-auto max-w-7xl px-4 pt-4">
-        <Tabs defaultIndex={4}>
+        <Tabs defaultIndex={5}>
           <div className="mt-2">
             <TabList>
+              <Tab>Summary</Tab>
               <Tab>Generation</Tab>
               <Tab>Peak Demand Met</Tab>
               <Tab>Supply</Tab>
@@ -27,6 +29,16 @@ export default function App() {
               <Tab>Latest Reports</Tab>
             </TabList>
           </div>
+
+          {/* ===========================
+              Summary
+              =========================== */}
+          <TabPanel>
+            <SummaryCard
+              rtmCsvUrl="/data/RTM Prices.csv"
+              supplyCsvUrl="/data/supply.csv"
+            />
+          </TabPanel>
 
           {/* ===========================
               Generation (WITH SUB-TABS)
