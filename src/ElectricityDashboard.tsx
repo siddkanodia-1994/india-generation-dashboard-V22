@@ -214,6 +214,11 @@ function sortISO(a: string, b: string) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+function daysInMonth(isoMonth: string): number {
+  const [y, m] = isoMonth.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
+}
+
 function asFiniteNumber(v: unknown): number | null {
   if (typeof v === "number" && Number.isFinite(v)) return v;
   const n = Number(v);
@@ -406,15 +411,21 @@ function toMonthlySumComparable(sortedDaily: DailyPoint[]) {
   }));
 
   for (const r of out) {
+    const isComplete = r.max_day >= daysInMonth(r.month);
+
     const prevMonth = addMonths(r.month, -1);
     const prevMonthRec = monthMap.get(prevMonth);
-    const prevComparableMoM = sumMonthUpToDay(prevMonthRec, r.max_day);
-    r.mom_pct = prevComparableMoM != null ? growthPct(r.value, prevComparableMoM) : null;
+    const prevMoM = isComplete
+      ? (prevMonthRec?.sum ?? null)
+      : sumMonthUpToDay(prevMonthRec, r.max_day);
+    r.mom_pct = prevMoM != null ? growthPct(r.value, prevMoM) : null;
 
     const prevYearMonth = `${getYear(r.month) - 1}-${String(getMonth(r.month)).padStart(2, "0")}`;
     const prevYearRec = monthMap.get(prevYearMonth);
-    const prevComparableYoY = sumMonthUpToDay(prevYearRec, r.max_day);
-    r.yoy_pct = prevComparableYoY != null ? growthPct(r.value, prevComparableYoY) : null;
+    const prevYoY = isComplete
+      ? (prevYearRec?.sum ?? null)
+      : sumMonthUpToDay(prevYearRec, r.max_day);
+    r.yoy_pct = prevYoY != null ? growthPct(r.value, prevYoY) : null;
   }
 
   return out;
