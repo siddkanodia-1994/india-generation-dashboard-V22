@@ -100,410 +100,107 @@ def _append_csv(path: str, row: list) -> None:
         csv.writer(f).writerow(row)
 
 
-# ── Excel URL discovery via Playwright ────────────────────────────────────────
+# ── Excel URL discovery via Grid India REST API ────────────────────────────────
+# Grid India exposes an undocumented REST API at webapi.grid-india.in that returns
+# file listings. The CDN (webcdn.grid-india.in) serves files directly without any
+# browser or IP restrictions — no Playwright needed.
 
-def _make_browser_context(pw):
-    browser = pw.chromium.launch(
-        headless=True,
-        args=[
-            "--no-sandbox",
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--window-size=1280,800",
-        ],
-    )
-    context = browser.new_context(
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ),
-        viewport={"width": 1280, "height": 800},
-        locale="en-IN",
-        java_script_enabled=True,
-    )
-    context.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        Object.defineProperty(navigator, 'plugins',   {get: () => [1, 2, 3]});
-        Object.defineProperty(navigator, 'languages', {get: () => ['en-IN', 'en']});
-    """)
-    return browser, context
-
-
-def _date_variants(d: date) -> list:
-    return [
-        d.strftime("%d_%m_%Y"),   # 17_03_2026
-        d.strftime("%d%m%Y"),     # 17032026
-        d.strftime("%d-%m-%Y"),   # 17-03-2026
-        d.strftime("%d.%m.%Y"),   # 17.03.2026
-        d.strftime("%d_%m_%y"),   # 17_03_26
-        d.strftime("%d%m%y"),     # 170326
-    ]
+_GRID_API_FILE_URL = "https://webapi.grid-india.in/api/v1/file"
+_GRID_CDN_BASE     = "https://webcdn.grid-india.in"
 
 
 def _find_excel_url(target_date: date):
     """
-    Use Playwright to render the Grid India Daily PSP Report page and find
-    the Excel (.xls/.xlsx) download link for target_date.
-
-    Actual URL format (from CDN):
-      https://webcdn.grid-india.in/files/grdw/YYYY/MM/DD.MM.YY_NLDC_PSP_{id}.xls
-    The date prefix DD.MM.YY is the data date embedded in the filename.
+    Use Grid India REST API to find the XLS download URL for target_date.
+    No browser required — works from any IP including GitHub Actions.
     """
+    fy           = _fy_label(target_date)           # e.g. "2025-26"
+    month        = target_date.strftime("%m")        # e.g. "03"
+    date_prefix  = target_date.strftime("%d.%m.%y") # e.g. "18.03.26"
+
+    print(f"[GRID] Querying Grid India API for {target_date} (FY={fy}, month={month})...")
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("[GRID] Playwright not installed.")
+        resp = requests.post(
+            _GRID_API_FILE_URL,
+            json={"_source": "GRDW", "_type": "DAILY_PSP_REPORT",
+                  "_fileDate": fy, "_month": month},
+            headers=HEADERS,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        items = resp.json().get("retData") or []
+    except Exception as e:
+        print(f"[GRID] API error: {e}")
         return None
 
-    # Match filename prefix DD.MM.YY (e.g. "17.03.26")
-    date_prefix = target_date.strftime("%d.%m.%y")
+    for item in items:
+        fp = item.get("FilePath", "")
+        if date_prefix in fp and fp.endswith(".xls"):
+            url = f"{_GRID_CDN_BASE}/{fp}"
+            print(f"[GRID] Found XLS: {url}")
+            return url
 
-    print(f"[GRID] Loading page: {GRID_INDIA_REPORTS_URL}")
-    with sync_playwright() as pw:
-        browser, context = _make_browser_context(pw)
-        page = context.new_page()
-        try:
-            page.goto(GRID_INDIA_REPORTS_URL, wait_until="domcontentloaded", timeout=60000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=20000)
-            except Exception:
-                pass
-            try:
-                page.wait_for_selector("a[href*='.xls']", timeout=20000)
-            except Exception:
-                pass
-            page.wait_for_timeout(1500)
-
-            # Switch to 100 per page so ~50 dates are visible in one load
-            try:
-                sel = page.locator("select").filter(has_text="50")
-                if sel.count():
-                    sel.first.select_option("100")
-                    page.wait_for_timeout(2000)
-            except Exception:
-                pass
-
-            hrefs = page.eval_on_selector_all(
-                "a[href]",
-                "els => els.map(e => e.getAttribute('href'))"
-            )
-            print(f"[GRID] Found {len(hrefs)} links on rendered page")
-        except Exception as e:
-            print(f"[GRID] Playwright page load failed: {e}")
-            hrefs = []
-        finally:
-            browser.close()
-
-    for href in hrefs:
-        if not href:
-            continue
-        lower = href.lower()
-        # Must be an Excel file
-        if not (lower.endswith(".xls") or lower.endswith(".xlsx")):
-            continue
-        # Filename must start with DD.MM.YY (e.g. "17.03.26_NLDC_PSP_...")
-        filename = href.rsplit("/", 1)[-1]
-        if filename.startswith(date_prefix):
-            full = href if href.startswith("http") else GRID_INDIA_PDF_BASE + href
-            print(f"[GRID] Found Excel: {full}")
-            return full
-
+    print(f"[GRID] No XLS found for {date_prefix} in API response ({len(items)} files).")
     return None
 
 
 def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
     """
-    Single Playwright session.
-    1. Navigate to Grid India PSP report page
-    2. Select "ALL" from the Date Filter dropdown (shows all financial years)
-    3. Set 100-per-page
-    4. Paginate through all pages, collecting .xls hrefs for dates in [start_date, end_date]
-    Returns {date: url}.
+    Use Grid India REST API to collect {date: url} for all XLS files in [start_date, end_date].
+    No browser required — works from any IP including GitHub Actions.
     """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("[GRID] Playwright not installed.")
-        return {}
+    import re as _re
 
-    result = {}
+    # Build the set of (fy, month) pairs that overlap the date range
+    fy_months = set()
+    d = start_date.replace(day=1)
+    while d <= end_date:
+        fy_months.add((_fy_label(d), d.strftime("%m")))
+        if d.month == 12:
+            d = d.replace(year=d.year + 1, month=1)
+        else:
+            d = d.replace(month=d.month + 1)
+    fy_months.add((_fy_label(end_date), end_date.strftime("%m")))
 
-    def _extract_xls_links(pg):
-        hrefs = pg.eval_on_selector_all("a[href]", "els => els.map(e => e.getAttribute('href'))")
-        found = {}
-        for href in hrefs:
-            if not href:
-                continue
-            lower = href.lower()
-            if not (lower.endswith(".xls") or lower.endswith(".xlsx")):
-                continue
-            filename = href.rsplit("/", 1)[-1]
-            try:
-                prefix = filename.split("_")[0]   # "17.03.26"
-                day, mon, yr = prefix.split(".")
-                d = date(2000 + int(yr), int(mon), int(day))
-            except Exception:
-                continue
-            if start_date <= d <= end_date:
-                full = href if href.startswith("http") else GRID_INDIA_PDF_BASE + href
-                found[d] = full
-        return found
+    print(f"[GRID-API] Collecting XLS URLs {start_date} → {end_date} "
+          f"({len(fy_months)} FY-month buckets)...")
 
-    print(f"[GRID] Collecting Excel URLs {start_date} → {end_date} (ALL years)...")
-    with sync_playwright() as pw:
-        browser, context = _make_browser_context(pw)
-        page = context.new_page()
+    url_map = {}
+    for fy, month in sorted(fy_months):
+        print(f"[GRID-API] Fetching FY={fy} month={month}...")
         try:
-            page.goto(GRID_INDIA_REPORTS_URL, wait_until="domcontentloaded", timeout=60000)
-            try:
-                page.wait_for_load_state("networkidle", timeout=20000)
-            except Exception:
-                pass
-            try:
-                page.wait_for_selector("a[href*='.xls']", timeout=20000)
-            except Exception:
-                pass
-            page.wait_for_timeout(1500)
-
-            # ── Step 1: Interact with the custom React Date Filter ───────────────
-            # The Date Filter is a custom React component (NOT a native <select>).
-            # We use JavaScript evaluation to find the dropdown trigger and click options.
-
-            fy_list = _fy_labels_in_range(start_date, end_date)
-            print(f"[GRID] Financial years to collect: {fy_list}")
-
-            def _js_click_exact_text(text, exclude_nav=False):
-                """Click the first visible leaf DOM element whose text exactly matches `text`.
-                If exclude_nav=True, skips elements inside <nav> or <header>."""
-                clicked = page.evaluate(
-                    """([lbl, exNav]) => {
-                        const all = [...document.querySelectorAll('*')];
-                        const el = all.find(e =>
-                            e.children.length === 0 &&
-                            e.textContent.trim() === lbl &&
-                            e.offsetParent !== null &&
-                            (!exNav || (!e.closest('nav') && !e.closest('header')))
-                        );
-                        if (el) { el.click(); return el.tagName + '|' + (el.className||'').substring(0,60); }
-                        return null;
-                    }""",
-                    [text, exclude_nav],
-                )
-                if clicked:
-                    print(f"[GRID] JS-clicked '{text}' → {clicked}")
-                    return True
-                return False
-
-            def _visible_short_texts():
-                """Return list of visible leaf texts (≤25 chars) for debugging."""
-                try:
-                    return page.evaluate(r"""() => {
-                        return [...document.querySelectorAll('*')]
-                            .filter(el =>
-                                el.children.length === 0 &&
-                                el.offsetParent !== null &&
-                                el.textContent.trim().length > 0 &&
-                                el.textContent.trim().length <= 25
-                            )
-                            .map(el => el.textContent.trim())
-                            .filter((v, i, a) => a.indexOf(v) === i)
-                            .slice(0, 40);
-                    }""")
-                except Exception:
-                    return []
-
-            def _get_fy_trigger_text():
-                """Return the text currently shown in the Date Filter trigger (e.g. '2025-26').
-                Also logs detailed DOM info so we can identify the correct element."""
-                try:
-                    debug_info = page.evaluate(r"""() => {
-                        const fyPat = /^\d{4}-\d{2}$/;
-                        const all = [...document.querySelectorAll('*')];
-                        return all
-                            .filter(el => fyPat.test(el.textContent.trim()))
-                            .map(el => ({
-                                text: el.textContent.trim(),
-                                tag: el.tagName,
-                                id: el.id || '',
-                                cls: (el.className || '').substring(0, 100),
-                                parentTag: el.parentElement ? el.parentElement.tagName : '',
-                                parentCls: (el.parentElement
-                                            ? el.parentElement.className || ''
-                                            : '').substring(0, 100),
-                                gpCls: (el.parentElement && el.parentElement.parentElement
-                                        ? el.parentElement.parentElement.className || ''
-                                        : '').substring(0, 100),
-                                inNav: !!el.closest('nav'),
-                                inHeader: !!el.closest('header'),
-                                visible: el.offsetParent !== null,
-                            }));
-                    }""")
-                    print(f"[GRID] FY elements on page: {debug_info}")
-                    # Prefer visible elements not inside <nav> or <header>
-                    candidates = [d for d in debug_info if d['visible'] and not d['inNav'] and not d['inHeader']]
-                    if candidates:
-                        return candidates[0]['text']
-                    # Fallback to any visible
-                    visible = [d for d in debug_info if d['visible']]
-                    return visible[0]['text'] if visible else None
-                except Exception as e:
-                    print(f"[GRID] _get_fy_trigger_text error: {e}")
-                    return None
-
-            def _select_date_filter(label):
-                """Open the React Select Date Filter and click the option for `label`.
-                Uses .my-select__control to open and [class*='my-select__option'] to select."""
-                try:
-                    # Click the React Select control div to open the dropdown
-                    control = page.locator(".my-select__control").first
-                    if not control.count():
-                        print("[GRID] .my-select__control not found on page")
-                        return False
-
-                    print(f"[GRID] Opening React Select Date Filter for '{label}'")
-                    control.click()
-                    page.wait_for_timeout(1000)
-
-                    # Inspect what options React Select rendered
-                    options_info = page.evaluate("""() => {
-                        return [...document.querySelectorAll('[class*="my-select__option"]')]
-                            .map(el => ({
-                                text: el.textContent.trim(),
-                                cls: (el.className || '').substring(0, 80),
-                            }));
-                    }""")
-                    print(f"[GRID] React Select options: {options_info}")
-
-                    # Click the matching option directly via JS (bypasses offsetParent issues)
-                    clicked = page.evaluate(
-                        """([lbl]) => {
-                            const opts = [...document.querySelectorAll('[class*="my-select__option"]')];
-                            const el = opts.find(e => e.textContent.trim() === lbl);
-                            if (el) { el.click(); return (el.className || '').substring(0, 80); }
-                            return null;
-                        }""",
-                        [label],
-                    )
-
-                    if clicked:
-                        # Wait for the table to reload after filter change
-                        try:
-                            page.wait_for_selector("a[href*='.xls']", timeout=15000)
-                        except Exception:
-                            pass
-                        page.wait_for_timeout(1500)
-                        print(f"[GRID] Selected '{label}' → {clicked}")
-                        return True
-
-                    print(f"[GRID] Option '{label}' not in React Select menu")
-                    page.keyboard.press("Escape")
-                    return False
-                except Exception as e:
-                    print(f"[GRID] _select_date_filter({label}) error: {e}")
-                    return False
-
-            # Try selecting ALL first — if it works, one pass covers every year
-            if _select_date_filter("ALL"):
-                fy_list = [None]  # single pass with all years visible
-                print("[GRID] Using 'ALL' years — will paginate through entire history")
-            else:
-                print("[GRID] 'ALL' selection failed — falling back to per-FY iteration")
-
-            def _set_100_per_page():
-                """Set the per-page count to 100.
-                Waits for the <select> to appear, then dispatches a React-compatible change."""
-                try:
-                    # Wait for per-page select to be present in DOM
-                    page.wait_for_selector("select", timeout=10000)
-                    changed = page.evaluate("""() => {
-                        const sel = document.querySelector('select');
-                        if (!sel) return 'no select found';
-                        const opts = [...sel.options].map(o => o.value);
-                        const best = opts.includes('100') ? '100'
-                                    : opts.includes('75') ? '75'
-                                    : opts.includes('50') ? '50'
-                                    : null;
-                        if (!best) return 'no 100/75/50 option';
-                        const nativeSetter = Object.getOwnPropertyDescriptor(
-                            window.HTMLSelectElement.prototype, 'value').set;
-                        nativeSetter.call(sel, best);
-                        sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        return best;
-                    }""")
-                    print(f"[GRID] Per-page change result: {changed}")
-                    # Wait for table to reload with new per-page setting
-                    try:
-                        page.wait_for_selector("a[href*='.xls']", timeout=15000)
-                    except Exception:
-                        pass
-                    page.wait_for_timeout(1500)
-                except Exception as e:
-                    print(f"[GRID] _set_100_per_page error: {e}")
-
-            def _next_page():
-                """Click the '>' next-page button. Returns True if navigated."""
-                for selector in [
-                    "button:text-is('>')",
-                    "button:has-text('>')",
-                    "button:text-is('›')",
-                    "button:has-text('›')",
-                    "button[aria-label*='next' i]",
-                    "[aria-label='Next page']",
-                    ".pagination-next",
-                    "li.next a",
-                ]:
-                    try:
-                        btn = page.locator(selector).first
-                        if btn.count() and btn.is_visible() and btn.is_enabled():
-                            btn.click()
-                            try:
-                                page.wait_for_selector("a[href*='.xls']", timeout=10000)
-                            except Exception:
-                                pass
-                            page.wait_for_timeout(1500)
-                            return True
-                    except Exception:
-                        continue
-                return False
-
-            # ── Steps 2+3: For each FY, select it, set 100/page, paginate ───────
-            logged_buttons = False
-            for fy in fy_list:
-                if fy is not None:
-                    print(f"[GRID] Selecting FY: {fy}")
-                    if not _select_date_filter(fy):
-                        print(f"[GRID] Could not select FY '{fy}' — skipping")
-                        continue
-
-                _set_100_per_page()
-
-                page_num = 1
-                while True:
-                    found = _extract_xls_links(page)
-                    new = {d: u for d, u in found.items() if d not in result}
-                    result.update(new)
-                    lbl = fy or "default"
-                    print(f"[GRID] FY={lbl} page {page_num}: {len(found)} in range, {len(new)} new, total={len(result)}")
-
-                    if not logged_buttons:
-                        btns = page.eval_on_selector_all("button", "els => els.map(e => e.textContent.trim())")
-                        print(f"[GRID] Buttons on page: {[b for b in btns if b][:15]}")
-                        logged_buttons = True
-
-                    if _next_page():
-                        page_num += 1
-                    else:
-                        print(f"[GRID] FY={lbl}: no more pages after page {page_num}")
-                        break
-
+            resp = requests.post(
+                _GRID_API_FILE_URL,
+                json={"_source": "GRDW", "_type": "DAILY_PSP_REPORT",
+                      "_fileDate": fy, "_month": month},
+                headers=HEADERS,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            items = resp.json().get("retData") or []
         except Exception as e:
-            print(f"[GRID] _collect_all_excel_urls error: {e}")
-        finally:
-            browser.close()
+            print(f"[GRID-API] Error for FY={fy} month={month}: {e}")
+            continue
 
-    print(f"[GRID] Total Excel URLs collected: {len(result)}")
-    return result
+        for item in items:
+            fp = item.get("FilePath", "")
+            if not fp.endswith(".xls"):
+                continue
+            title = item.get("Title_", "")
+            m = _re.match(r"(\d{2})\.(\d{2})\.(\d{2})_", title)
+            if m:
+                day_, mon_, yr_ = int(m.group(1)), int(m.group(2)), 2000 + int(m.group(3))
+                try:
+                    file_date = date(yr_, mon_, day_)
+                    if start_date <= file_date <= end_date:
+                        url_map[file_date] = f"{_GRID_CDN_BASE}/{fp}"
+                except ValueError:
+                    pass
+
+        print(f"[GRID-API] FY={fy} month={month}: total so far = {len(url_map)}")
+
+    print(f"[GRID-API] Total XLS URLs collected: {len(url_map)}")
+    return url_map
 
 
 # ── Excel loading (supports both .xls and .xlsx) ──────────────────────────────

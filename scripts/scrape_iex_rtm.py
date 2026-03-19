@@ -446,11 +446,9 @@ def scrape_rtm(target_date: date, period_label: str) -> bool:
         return False
 
     if solar_avg is None:
-        print("[RTM] WARNING: Solar avg unavailable; using daily avg.")
-        solar_avg = daily_avg
+        print("[RTM] WARNING: Solar avg unavailable; writing blank.")
     if nonsolar_avg is None:
-        print("[RTM] WARNING: NonSolar avg unavailable; using daily avg.")
-        nonsolar_avg = daily_avg
+        print("[RTM] WARNING: NonSolar avg unavailable; writing blank.")
 
     new_row = [_format_date(target_date), daily_avg, solar_avg, nonsolar_avg]
     print(f"[RTM] Writing row: {new_row}")

@@ -295,12 +295,13 @@ function csvParse(text: string, valueColumnKey: string) {
     const vRaw = row[valueIdx] ?? row[1] ?? "";
 
     const date = parseInputDate(dRaw);
-    const v = Number(String(vRaw).replace(/,/g, ""));
 
     if (!date) {
       errors.push(`Row ${i + 1}: invalid date '${dRaw}' (expected DD/MM/YYYY)`);
       continue;
     }
+    if (vRaw === "") continue; // blank cell → skip (creates gap in chart)
+    const v = Number(String(vRaw).replace(/,/g, ""));
     if (!Number.isFinite(v)) {
       errors.push(`Row ${i + 1}: invalid value '${vRaw}'`);
       continue;
