@@ -239,6 +239,81 @@ function pctClass(n: number | null | undefined): string {
   return n >= 0 ? "text-emerald-600 font-semibold" : "text-red-500 font-semibold";
 }
 
+/** Sum of all values in map within [fromIso, toIso] inclusive */
+function rangeSum(map: Map<string, number>, fromIso: string, toIso: string): number | null {
+  let sum = 0; let count = 0;
+  for (const [k, v] of map) {
+    if (k >= fromIso && k <= toIso) { sum += v; count++; }
+  }
+  return count > 0 ? sum : null;
+}
+
+function direction(pct: number | null, threshold = 1): string {
+  if (pct == null || !Number.isFinite(pct)) return "remained relatively flat";
+  if (pct > threshold) return "rose";
+  if (pct < -threshold) return "declined";
+  return "remained relatively flat";
+}
+
+function upDown(curr: number | null, prev: number | null): string {
+  if (curr == null || prev == null) return "remained stable";
+  return curr > prev ? "improved" : curr < prev ? "declined" : "remained stable";
+}
+
+// ── News fetching ─────────────────────────────────────────────────────────────
+
+type NewsItem = { title: string; url: string; source: string; publishedAtISO: string };
+
+const NEWS_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
+
+async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
+  const cacheKey = `pwr_news_${toIso}`;
+  try {
+    const cached = localStorage.getItem(cacheKey);
+    if (cached) {
+      const { ts, items } = JSON.parse(cached);
+      if (Date.now() - ts < NEWS_CACHE_TTL) return items;
+    }
+  } catch { /* ignore */ }
+
+  const fromDate = new Date(toIso + "T00:00:00Z");
+  fromDate.setUTCDate(fromDate.getUTCDate() - 10);
+  const fromIso = fromDate.toISOString().slice(0, 10);
+
+  const query = encodeURIComponent("India power electricity demand coal solar wind RTM");
+  const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=en-IN&gl=IN&ceid=IN:en`;
+  const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(rssUrl)}`;
+
+  const res = await fetch(proxyUrl);
+  const text = await res.text();
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(text, "application/xml");
+  const items: NewsItem[] = [];
+
+  for (const item of Array.from(doc.querySelectorAll("item"))) {
+    const title = item.querySelector("title")?.textContent?.trim() ?? "";
+    const link = item.querySelector("link")?.textContent?.trim() ?? "";
+    const pubDateStr = item.querySelector("pubDate")?.textContent?.trim() ?? "";
+    const source = item.querySelector("source")?.textContent?.trim() ?? "";
+    const pubDate = new Date(pubDateStr);
+    if (isNaN(pubDate.getTime())) continue;
+    const pubIso = pubDate.toISOString().slice(0, 10);
+    if (pubIso < fromIso || pubIso > toIso) continue;
+    const lower = title.toLowerCase();
+    if (!lower.includes("india") && !lower.includes("indian")) continue;
+    const powerTerms = ["power", "electricity", "energy", "coal", "solar", "wind", "rtm", "dam", "grid", "demand", "supply", "generation", "thermal", "renewable"];
+    if (!powerTerms.some((t) => lower.includes(t))) continue;
+    items.push({ title, url: link, source, publishedAtISO: pubDate.toISOString() });
+    if (items.length >= 8) break;
+  }
+
+  try {
+    localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), items }));
+  } catch { /* ignore */ }
+
+  return items;
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProps) {
@@ -247,6 +322,8 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
   const [supplyMap, setSupplyMap] = useState<Map<string, number>>(new Map());
   const [selectedDate, setSelectedDate] = useState<string>("");
   const [loading, setLoading] = useState(true);
+  const [newsItems, setNewsItems] = useState<NewsItem[]>([]);
+  const [newsLoading, setNewsLoading] = useState(false);
 
   useEffect(() => {
     Promise.all([fetch(rtmCsvUrl).then((r) => r.text()), fetch(supplyCsvUrl).then((r) => r.text())])
@@ -264,6 +341,17 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
       })
       .finally(() => setLoading(false));
   }, [rtmCsvUrl, supplyCsvUrl]);
+
+  // ── Fetch news on date change ────────────────────────────────────────────────
+  useEffect(() => {
+    if (!selectedDate) return;
+    setNewsLoading(true);
+    setNewsItems([]);
+    fetchPowerNews(selectedDate)
+      .then(setNewsItems)
+      .catch(() => setNewsItems([]))
+      .finally(() => setNewsLoading(false));
+  }, [selectedDate]);
 
   // ── Compute all metrics ──────────────────────────────────────────────────────
   const metrics = useMemo(() => {
@@ -308,13 +396,26 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
       m3Yoy: monthAvgYoY(supplyMap, pm3.y, pm3.m),
     };
 
-    return { rtm, sup, wdName, year, month, day, pm1, pm2, pm3 };
+    // FY YTD supply
+    const fyStartYear = month >= 4 ? year : year - 1;
+    const ytdStart = `${fyStartYear}-04-01`;
+    const ytdSupCurr = rangeSum(supplyMap, ytdStart, ref);
+    const ytdSupPrior = rangeSum(supplyMap, `${fyStartYear - 1}-04-01`, isoMinusDays(ref, 365));
+    const ytdYoy = growthPct(ytdSupCurr, ytdSupPrior);
+    const fyLabel = `Apr ${fyStartYear} – ${monthLabel(pm1.y, pm1.m)}`;
+
+    // RTM WoW
+    const avg30WoW = growthPct(rtm.avg30, rtm.prev30);
+    const avg7WoW = growthPct(rtm.avg7, rtm.prevAvg7);
+    const prev7DateLabel = formatDisplayDate(isoMinusDays(ref, 7));
+
+    return { rtm, sup, wdName, year, month, day, pm1, pm2, pm3, ytdYoy, fyLabel, avg30WoW, avg7WoW, prev7DateLabel };
   }, [selectedDate, rtmMap, supplyMap]);
 
   // ── Excel download (exceljs — styled, single sheet) ──────────────────────────
   async function downloadExcel() {
     if (!metrics) return;
-    const { rtm, sup, wdName, year, month, day, pm1, pm2, pm3 } = metrics;
+    const { rtm, sup, wdName, year, month, day, pm1, pm2, pm3, ytdYoy, fyLabel, avg30WoW, avg7WoW, prev7DateLabel } = metrics;
 
     // Dynamic import so exceljs doesn't bloat initial bundle
     const ExcelJS = (await import("exceljs")).default;
@@ -517,7 +618,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
     return <div className="p-8 text-center text-slate-500">No data available.</div>;
   }
 
-  const { rtm, sup, wdName, year, month, day, pm1, pm2, pm3 } = metrics;
+  const { rtm, sup, wdName, year, month, day, pm1, pm2, pm3, ytdYoy, fyLabel, avg30WoW, avg7WoW, prev7DateLabel } = metrics;
   const currMonthLabel = `${MONTH_FULL[month - 1]} ${year}`;
 
   return (
@@ -706,6 +807,84 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
               </tr>
             </tbody>
           </table>
+        </div>
+
+        {/* ── Market Commentary ── */}
+        <div className="border border-slate-200 rounded-lg p-4 bg-slate-50 space-y-3">
+          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Market Commentary</div>
+
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">RTM Price Summary</p>
+          <p className="text-sm text-slate-800 leading-relaxed">
+            The 30-day rolling RTM price{" "}
+            <strong className="font-semibold text-slate-900">{direction(avg30WoW)}</strong>{" "}
+            to{" "}
+            <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.avg30)}/kWh</strong>{" "}
+            as of {wdName} {formatDisplayDate(selectedDate)}, from{" "}
+            <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.prev30)}/kWh</strong>{" "}
+            on {prev7DateLabel} —{" "}
+            <span className={pctClass(avg30WoW)}>{fmtPct(avg30WoW)} WoW</span>.
+          </p>
+          <p className="text-sm text-slate-800 leading-relaxed">
+            The 7-day average RTM price{" "}
+            <strong className="font-semibold text-slate-900">{direction(avg7WoW)}</strong>{" "}
+            to{" "}
+            <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.avg7)}/kWh</strong>,
+            compared to{" "}
+            <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.prevAvg7)}/kWh</strong>{" "}
+            last week (<span className={pctClass(avg7WoW)}>{fmtPct(avg7WoW)}</span>).
+          </p>
+
+          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mt-1">Demand Summary</p>
+          <p className="text-sm text-slate-800 leading-relaxed">
+            The rolling 30-day average power demand{" "}
+            <strong className="font-semibold text-slate-900">{upDown(sup.avg30Yoy, sup.prev30Yoy)}</strong>{" "}
+            to{" "}
+            <span className={pctClass(sup.avg30Yoy)}>{fmtPct(sup.avg30Yoy)} YoY</span>,{" "}
+            {sup.avg30Yoy != null && sup.prev30Yoy != null ? (sup.avg30Yoy > sup.prev30Yoy ? "up" : "down") : ""}{" "}
+            from{" "}
+            <span className={pctClass(sup.prev30Yoy)}>{fmtPct(sup.prev30Yoy)} YoY</span> a week ago.
+          </p>
+          <p className="text-sm text-slate-800 leading-relaxed">
+            As of {formatDisplayDate(selectedDate)}, Year-to-Date ({fyLabel}) power demand growth stands at{" "}
+            <span className={pctClass(ytdYoy)}><strong className="font-semibold">{fmtPct(ytdYoy)} YoY</strong></span>.{" "}
+            The 7-day average demand growth is{" "}
+            <span className={pctClass(sup.avg7Yoy)}>{fmtPct(sup.avg7Yoy)} YoY</span>.
+          </p>
+        </div>
+
+        {/* ── Key Power Updates ── */}
+        <div>
+          <div className="bg-blue-50 border-l-4 border-blue-400 px-3 py-1.5 text-sm font-semibold text-blue-800">
+            Other key developments in the Indian power sector — Last 10 days as on {formatDisplayDate(selectedDate)}
+          </div>
+          <div className="mt-2 space-y-2">
+            {newsLoading && (
+              <p className="text-sm text-slate-500 px-1">Loading news…</p>
+            )}
+            {!newsLoading && newsItems.length === 0 && (
+              <p className="text-sm text-slate-500 px-1">No recent news found for this date range.</p>
+            )}
+            {!newsLoading && newsItems.map((item, i) => {
+              const pubDate = new Date(item.publishedAtISO);
+              const dateStr = `${ordinal(pubDate.getUTCDate())} ${MONTH_NAMES[pubDate.getUTCMonth()]} ${pubDate.getUTCFullYear()}`;
+              return (
+                <div key={i} className="flex gap-2 text-sm">
+                  <span className="text-slate-400 font-semibold shrink-0">{i + 1}.</span>
+                  <span>
+                    <a
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-slate-800 hover:text-blue-700 hover:underline"
+                    >
+                      {item.title}
+                    </a>
+                    <span className="text-xs text-slate-500 ml-1">— {item.source} · {dateStr}</span>
+                  </span>
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
     </>
