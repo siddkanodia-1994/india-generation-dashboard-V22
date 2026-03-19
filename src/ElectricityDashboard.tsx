@@ -1568,7 +1568,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                 <div className="rounded-xl bg-white px-4 py-2 ring-1 ring-slate-200 text-center">
                   <div className="text-lg font-bold text-slate-900">{fmtValue(kpis.latest.value)}</div>
                   {hideMainBadgeLabel
-                    ? <div className="text-xs invisible">-</div>
+                    ? <div className="text-xs text-slate-500">PLF</div>
                     : <div className="text-xs text-slate-500">Avg · {unitLabel}</div>}
                 </div>
               )}
