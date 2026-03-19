@@ -574,9 +574,13 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
   async function downloadPDF() {
     const element = document.getElementById("summary-printable");
     if (!element) return;
+    // Hide controls (date picker + buttons) before capture
+    const controls = element.querySelector<HTMLElement>(".no-print");
+    if (controls) controls.style.visibility = "hidden";
     const html2canvas = (await import("html2canvas")).default;
     const { jsPDF } = await import("jspdf");
     const canvas = await html2canvas(element, { scale: 2, useCORS: true });
+    if (controls) controls.style.visibility = "";
     const imgData = canvas.toDataURL("image/png");
     const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
     const pageW = pdf.internal.pageSize.getWidth();
