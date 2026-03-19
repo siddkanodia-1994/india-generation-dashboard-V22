@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useState } from "react";
-import * as XLSX from "xlsx";
 
 interface SummaryCardProps {
   rtmCsvUrl: string;
@@ -312,51 +311,162 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
     return { rtm, sup, wdName, year, month, day, pm1, pm2, pm3 };
   }, [selectedDate, rtmMap, supplyMap]);
 
-  // ── Excel download ───────────────────────────────────────────────────────────
-  function downloadExcel() {
+  // ── Excel download (exceljs — styled, single sheet) ──────────────────────────
+  async function downloadExcel() {
     if (!metrics) return;
     const { rtm, sup, wdName, year, month, day, pm1, pm2, pm3 } = metrics;
 
-    const rtmRows = [
-      ["Metric", "₹/Per Unit", "% Change"],
-      ["Avg Last 30 Days", fmtPrice(rtm.avg30), ""],
-      ["Previous 30 Days Avg (shifted 7d)", fmtPrice(rtm.prev30), fmtPct(growthPct(rtm.avg30, rtm.prev30))],
-      [],
-      ["Avg Last 7 Days", fmtPrice(rtm.avg7), ""],
-      ["Avg Previous 7 Days", fmtPrice(rtm.prevAvg7), fmtPct(growthPct(rtm.avg7, rtm.prevAvg7))],
-      [],
-      [`${wdName} RTM Price`, fmtPrice(rtm.refDay), ""],
-      [`Avg Last 3 ${wdName}s`, fmtPrice(rtm.weekday3Avg), fmtPct(growthPct(rtm.refDay, rtm.weekday3Avg))],
-      [],
-      [`${monthLabel(year, month)} Monthly`, fmtPrice(rtm.currMonthAvg), ""],
-      [`${monthLabel(pm1.y, pm1.m)} Monthly Avg`, fmtPrice(rtm.m1Avg), fmtPct(growthPct(rtm.currMonthAvg, rtm.m1Avg))],
-      [`${monthLabel(pm2.y, pm2.m)} Monthly Avg`, fmtPrice(rtm.m2Avg), fmtPct(growthPct(rtm.currMonthAvg, rtm.m2Avg))],
-      [`${monthLabel(pm3.y, pm3.m)} Monthly Avg`, fmtPrice(rtm.m3Avg), fmtPct(growthPct(rtm.currMonthAvg, rtm.m3Avg))],
+    // Dynamic import so exceljs doesn't bloat initial bundle
+    const ExcelJS = (await import("exceljs")).default;
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Power Daily Update");
+
+    ws.columns = [
+      { key: "a", width: 36 },
+      { key: "b", width: 16 },
+      { key: "c", width: 16 },
     ];
 
-    const supRows = [
-      ["Metric", "YoY % Growth"],
-      ["Avg Last 30 Days", fmtPct(sup.avg30Yoy)],
-      ["Previous 30 Days Avg (shifted 7d)", fmtPct(sup.prev30Yoy)],
-      [],
-      ["Avg Last 7 Days", fmtPct(sup.avg7Yoy)],
-      ["Avg Previous 7 Days", fmtPct(sup.prevAvg7Yoy)],
-      [],
-      [`${wdName} YoY Growth`, fmtPct(sup.refDayYoy)],
-      [`Avg Last 3 ${wdName}s`, fmtPct(sup.weekday3Yoy)],
-      [],
-      [`${monthLabel(year, month)} Monthly`, fmtPct(sup.currMonthYoy)],
-      [`${monthLabel(pm1.y, pm1.m)} Monthly Avg`, fmtPct(sup.m1Yoy)],
-      [`${monthLabel(pm2.y, pm2.m)} Monthly Avg`, fmtPct(sup.m2Yoy)],
-      [`${monthLabel(pm3.y, pm3.m)} Monthly Avg`, fmtPct(sup.m3Yoy)],
-    ];
+    // ── Style helpers ──────────────────────────────────────────────────────────
+    type Fill = { type: "pattern"; pattern: "solid"; fgColor: { argb: string } };
+    const solidFill = (argb: string): Fill => ({ type: "pattern", pattern: "solid", fgColor: { argb } });
 
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rtmRows), "RTM Price Update");
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(supRows), "Power Demand Update");
+    function styleRow(
+      row: ExcelJS.Row,
+      opts: {
+        bgArgb?: string;
+        fontArgb?: string;
+        bold?: boolean;
+        fontSize?: number;
+        numCols?: number;
+      }
+    ) {
+      const n = opts.numCols ?? 3;
+      for (let c = 1; c <= n; c++) {
+        const cell = row.getCell(c);
+        if (opts.bgArgb) cell.fill = solidFill(opts.bgArgb);
+        cell.font = {
+          bold: opts.bold ?? false,
+          color: { argb: opts.fontArgb ?? "FF0F172A" },
+          size: opts.fontSize ?? 11,
+        };
+        cell.alignment = { vertical: "middle", horizontal: c === 1 ? "left" : "right" };
+        cell.border = {
+          bottom: { style: "thin", color: { argb: "FFE2E8F0" } },
+        };
+      }
+    }
+
+    function pctArgb(n: number | null | undefined): string {
+      if (n == null || !Number.isFinite(n)) return "FF94A3B8";
+      return n >= 0 ? "FF059669" : "FFEF4444";
+    }
+
+    // ── Title row ─────────────────────────────────────────────────────────────
+    const titleRow = ws.addRow([`Power Daily Update — ${wdName} (${formatDisplayDate(selectedDate)})`, "", ""]);
+    titleRow.height = 22;
+    ws.mergeCells(`A${titleRow.number}:C${titleRow.number}`);
+    styleRow(titleRow, { bold: true, fontSize: 13, bgArgb: "FFFFFFFF" });
+    ws.addRow([]);
+
+    // ── RTM section ───────────────────────────────────────────────────────────
+    const rtmHdr = ws.addRow(["RTM Price Update", "", ""]);
+    ws.mergeCells(`A${rtmHdr.number}:C${rtmHdr.number}`);
+    styleRow(rtmHdr, { bgArgb: "FF84CC16", bold: true, fontArgb: "FF1A2E05" });
+
+    const rtmColHdr = ws.addRow(["Metric", "₹/Per Unit", "% Change"]);
+    styleRow(rtmColHdr, { bgArgb: "FF111827", fontArgb: "FFFFFFFF", bold: true });
+
+    function addRtmDataRow(label: string, val: string, pctNum: number | null, isPrimary: boolean) {
+      const row = ws.addRow([label, val, fmtPct(pctNum)]);
+      row.height = 18;
+      const bgArgb = isPrimary ? "FFF8FAFC" : "FFFFFFFF";
+      styleRow(row, { bgArgb, fontArgb: isPrimary ? "FF0F172A" : "FF475569", bold: isPrimary });
+      // Override pct cell color
+      const pctCell = row.getCell(3);
+      pctCell.font = { bold: true, color: { argb: pctArgb(pctNum) }, size: 11 };
+    }
+
+    function addSpacer() {
+      ws.addRow([]).height = 6;
+    }
+
+    // Group 1
+    addRtmDataRow("Avg Last 30 Days", fmtPrice(rtm.avg30), null, true);
+    addRtmDataRow("Previous 30 Days Avg", fmtPrice(rtm.prev30), growthPct(rtm.avg30, rtm.prev30), false);
+    addSpacer();
+    // Group 2
+    addRtmDataRow("Avg Last 7 Days", fmtPrice(rtm.avg7), null, true);
+    addRtmDataRow("Avg Previous 7 Days", fmtPrice(rtm.prevAvg7), growthPct(rtm.avg7, rtm.prevAvg7), false);
+    addSpacer();
+    // Group 3
+    addRtmDataRow(`${wdName} RTM Price`, fmtPrice(rtm.refDay), null, true);
+    addRtmDataRow(`Avg Last 3 ${wdName}s`, fmtPrice(rtm.weekday3Avg), growthPct(rtm.refDay, rtm.weekday3Avg), false);
+    addSpacer();
+    // Group 4
+    addRtmDataRow(`${monthLabel(year, month)} Monthly`, fmtPrice(rtm.currMonthAvg), null, true);
+    addRtmDataRow(`${monthLabel(pm1.y, pm1.m)} Monthly Avg`, fmtPrice(rtm.m1Avg), growthPct(rtm.currMonthAvg, rtm.m1Avg), false);
+    addRtmDataRow(`${monthLabel(pm2.y, pm2.m)} Monthly Avg`, fmtPrice(rtm.m2Avg), growthPct(rtm.currMonthAvg, rtm.m2Avg), false);
+    addRtmDataRow(`${monthLabel(pm3.y, pm3.m)} Monthly Avg`, fmtPrice(rtm.m3Avg), growthPct(rtm.currMonthAvg, rtm.m3Avg), false);
+
+    ws.addRow([]);
+    ws.addRow([]);
+
+    // ── Supply section ────────────────────────────────────────────────────────
+    ws.columns[1].width = 16; // reset (only 2 cols for supply)
+    const supHdr = ws.addRow(["Power Demand Update", "", ""]);
+    ws.mergeCells(`A${supHdr.number}:B${supHdr.number}`);
+    styleRow(supHdr, { bgArgb: "FF84CC16", bold: true, fontArgb: "FF1A2E05", numCols: 2 });
+
+    const supColHdr = ws.addRow(["Metric", "YoY % Growth"]);
+    styleRow(supColHdr, { bgArgb: "FF111827", fontArgb: "FFFFFFFF", bold: true, numCols: 2 });
+
+    function addSupDataRow(label: string, pctNum: number | null, isPrimary: boolean) {
+      const row = ws.addRow([label, fmtPct(pctNum)]);
+      row.height = 18;
+      const bgArgb = isPrimary ? "FFF8FAFC" : "FFFFFFFF";
+      for (let c = 1; c <= 2; c++) {
+        const cell = row.getCell(c);
+        cell.fill = solidFill(bgArgb);
+        cell.font = {
+          bold: c === 1 ? isPrimary : true,
+          color: { argb: c === 1 ? (isPrimary ? "FF0F172A" : "FF475569") : pctArgb(pctNum) },
+          size: 11,
+        };
+        cell.alignment = { vertical: "middle", horizontal: c === 1 ? "left" : "right" };
+        cell.border = { bottom: { style: "thin", color: { argb: "FFE2E8F0" } } };
+      }
+    }
+
+    // Group 1
+    addSupDataRow("Avg Last 30 Days", sup.avg30Yoy, true);
+    addSupDataRow("Previous 30 Days Avg", sup.prev30Yoy, false);
+    addSpacer();
+    // Group 2
+    addSupDataRow("Avg Last 7 Days", sup.avg7Yoy, true);
+    addSupDataRow("Avg Previous 7 Days", sup.prevAvg7Yoy, false);
+    addSpacer();
+    // Group 3
+    addSupDataRow(`${wdName} YoY Growth`, sup.refDayYoy, true);
+    addSupDataRow(`Avg Last 3 ${wdName}s`, sup.weekday3Yoy, false);
+    addSpacer();
+    // Group 4
+    addSupDataRow(`${monthLabel(year, month)} Monthly`, sup.currMonthYoy, true);
+    addSupDataRow(`${monthLabel(pm1.y, pm1.m)} Monthly Avg`, sup.m1Yoy, false);
+    addSupDataRow(`${monthLabel(pm2.y, pm2.m)} Monthly Avg`, sup.m2Yoy, false);
+    addSupDataRow(`${monthLabel(pm3.y, pm3.m)} Monthly Avg`, sup.m3Yoy, false);
+
+    // ── Download ──────────────────────────────────────────────────────────────
     const d = new Date(selectedDate + "T00:00:00Z");
     const fname = `Power_Daily_Update_${String(d.getUTCDate()).padStart(2, "0")}${MONTH_NAMES[d.getUTCMonth()]}${d.getUTCFullYear()}.xlsx`;
-    XLSX.writeFile(wb, fname);
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fname;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   // ── PDF download ─────────────────────────────────────────────────────────────
@@ -393,8 +503,9 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
       {/* Print-only styles */}
       <style>{`
         @media print {
-          body > * { display: none !important; }
-          #summary-printable { display: block !important; position: static !important; }
+          body * { visibility: hidden; }
+          #summary-printable, #summary-printable * { visibility: visible; }
+          #summary-printable { position: absolute; left: 0; top: 0; width: 100%; }
           .no-print { display: none !important; }
         }
       `}</style>
@@ -409,19 +520,21 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
           </div>
           <div className="no-print flex items-center gap-2">
             <label className="text-sm text-slate-600 font-medium">Date:</label>
-            <select
+            <input
+              type="date"
               className="border border-slate-300 rounded px-2 py-1 text-sm bg-white"
               value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-            >
-              {allRtmDates.map((d) => (
-                <option key={d} value={d}>
-                  {formatDropdownLabel(d)}
-                </option>
-              ))}
-            </select>
+              min={allRtmDates[allRtmDates.length - 1]}
+              max={allRtmDates[0]}
+              onChange={(e) => {
+                const picked = e.target.value;
+                if (!picked) return;
+                const closest = allRtmDates.find((d) => d <= picked) ?? allRtmDates[0];
+                setSelectedDate(closest);
+              }}
+            />
             <button
-              onClick={downloadExcel}
+              onClick={() => downloadExcel().catch(console.error)}
               className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium bg-emerald-600 hover:bg-emerald-700 text-white rounded"
             >
               ⬇ Excel
