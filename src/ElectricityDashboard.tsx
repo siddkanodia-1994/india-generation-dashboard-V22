@@ -2443,8 +2443,8 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           <tr key={w.weekStart} className="border-t border-slate-100">
                             <td className="px-3 py-2 font-medium text-slate-900">Week starting {formatDDMMYY(w.weekStart)}</td>
                             <td className="px-3 py-2 text-slate-700">{fmtValue(w.value)}</td>
-                            <td className="px-3 py-2 text-slate-700">{fmtPct(w.wow_pct)}</td>
-                            <td className="px-3 py-2 text-slate-700">{fmtPct(w.yoy_pct)}</td>
+                            <td className={`px-3 py-2 ${pctColorClass(w.wow_pct)}`}>{fmtPct(w.wow_pct)}</td>
+                            <td className={`px-3 py-2 ${pctColorClass(w.yoy_pct)}`}>{fmtPct(w.yoy_pct)}</td>
                           </tr>
                         ))}
                     </tbody>
@@ -2468,7 +2468,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           <tr key={r.fy} className="border-t border-slate-100">
                             <td className="px-3 py-2 font-medium text-slate-900">{r.fy}</td>
                             <td className="px-3 py-2 text-slate-700">{fmtValue(r.value)}</td>
-                            <td className="px-3 py-2 text-slate-700">{fmtPct(r.yoy_pct)}</td>
+                            <td className={`px-3 py-2 ${pctColorClass(r.yoy_pct)}`}>{fmtPct(r.yoy_pct)}</td>
                           </tr>
                         ))}
                     </tbody>
