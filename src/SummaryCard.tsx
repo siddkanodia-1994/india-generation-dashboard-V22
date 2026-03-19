@@ -470,8 +470,30 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
   }
 
   // ── PDF download ─────────────────────────────────────────────────────────────
-  function downloadPDF() {
-    window.print();
+  async function downloadPDF() {
+    const element = document.getElementById("summary-printable");
+    if (!element) return;
+    const html2canvas = (await import("html2canvas")).default;
+    const { jsPDF } = await import("jspdf");
+    const canvas = await html2canvas(element, { scale: 2, useCORS: true });
+    const imgData = canvas.toDataURL("image/png");
+    const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const imgH = (canvas.height * pageW) / canvas.width;
+    let heightLeft = imgH;
+    let pos = 0;
+    pdf.addImage(imgData, "PNG", 0, pos, pageW, imgH);
+    heightLeft -= pageH;
+    while (heightLeft > 0) {
+      pos -= pageH;
+      pdf.addPage();
+      pdf.addImage(imgData, "PNG", 0, pos, pageW, imgH);
+      heightLeft -= pageH;
+    }
+    const d = new Date(selectedDate + "T00:00:00Z");
+    const fname = `Power_Daily_Update_${String(d.getUTCDate()).padStart(2, "0")}${MONTH_NAMES[d.getUTCMonth()]}${d.getUTCFullYear()}.pdf`;
+    pdf.save(fname);
   }
 
   // ── Render helpers ───────────────────────────────────────────────────────────
@@ -501,15 +523,6 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
   return (
     <>
       {/* Print-only styles */}
-      <style>{`
-        @media print {
-          body * { visibility: hidden; }
-          #summary-printable, #summary-printable * { visibility: visible; }
-          #summary-printable { position: absolute; left: 0; top: 0; width: 100%; }
-          .no-print { display: none !important; }
-        }
-      `}</style>
-
       <div id="summary-printable" className="p-4 space-y-6">
         {/* ── Top bar ── */}
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -540,7 +553,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
               ⬇ Excel
             </button>
             <button
-              onClick={downloadPDF}
+              onClick={() => downloadPDF().catch(console.error)}
               className="flex items-center gap-1 px-3 py-1.5 text-sm font-medium bg-slate-700 hover:bg-slate-800 text-white rounded"
             >
               🖨 PDF
