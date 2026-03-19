@@ -8,8 +8,11 @@ Usage:
   python scrape_iced_niti.py --mode capacity
 """
 
+from __future__ import annotations
+
 import argparse
 import csv
+import json
 import re
 import sys
 import time
@@ -32,6 +35,21 @@ HEADERS = {
 
 SESSION = requests.Session()
 SESSION.headers.update(HEADERS)
+
+# ── ICED NITI REST API (coal PLF) ─────────────────────────────────────────────
+_ICED_API_URL = "https://icedapi.niti.gov.in/v1/performanceFilter"
+_ICED_API_KEY = "AHten@VP0W3R"
+_ICED_HEADERS = {
+    "KEY": _ICED_API_KEY,
+    "Origin": "https://iced.niti.gov.in",
+    "Content-Type": "application/json",
+}
+_PLF_PARAM_OBJ = [{
+    "name": "Plant Load Factor / CUF", "id": "plantLoadFactor",
+    "filterType": "parameter", "valueSuffix": "%", "graphType": "line",
+    "selected": True, "sources": True, "sourceLimit": 4,
+    "filterBy": True, "compareBy": True, "rangeBy": True, "dualAxis": True, "chartAxis": "first",
+}]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -103,84 +121,106 @@ def _get_soup(url: str) -> BeautifulSoup | None:
 
 # ── Coal PLF ─────────────────────────────────────────────────────────────────
 
-def _scrape_coal_plf(target_date: date) -> float | None:
-    """
-    Scrape daily coal PLF % from ICED NITI.
-    Returns PLF value or None.
-    """
-    # Try known API endpoints / data endpoints on ICED NITI
-    api_candidates = [
-        f"{ICED_NITI_URL}api/coal-plf",
-        f"{ICED_NITI_URL}api/power/coalplf",
-        f"{ICED_NITI_URL}api/daily-stats",
-        f"{ICED_NITI_URL}data/coal-plf.json",
-    ]
-    date_str_variants = [
-        target_date.strftime("%Y-%m-%d"),
-        target_date.strftime("%d-%m-%Y"),
-        target_date.strftime("%d/%m/%Y"),
-    ]
-    for api_url in api_candidates:
-        for ds in date_str_variants:
-            try:
-                r = SESSION.get(api_url, params={"date": ds}, timeout=15)
-                if r.status_code == 200:
-                    data = r.json()
-                    # Look for PLF value in response
-                    for key in ("plf", "PLF", "coal_plf", "CoalPLF", "value", "Value"):
-                        if key in data:
-                            return round(float(data[key]), 2)
-                    if isinstance(data, list) and data:
-                        first = data[0]
-                        for key in ("plf", "PLF", "coal_plf", "value"):
-                            if key in first:
-                                return round(float(first[key]), 2)
-            except Exception:
-                continue
+def _decrypt_iced(encrypted_json_str: str):
+    """Decrypt CryptoJS AES.encrypt() response (OpenSSL AES-256-CBC format)."""
+    import base64
+    import hashlib
+    from Crypto.Cipher import AES
 
-    # Fallback: scrape the dashboard page
-    soup = _get_soup(ICED_NITI_URL)
-    if soup is None:
-        return None
+    b64 = json.loads(encrypted_json_str)
+    raw = base64.b64decode(b64)
+    salt = raw[8:16]
+    encrypted = raw[16:]
+    passphrase = _ICED_API_KEY.encode()
+    d = b""
+    di = b""
+    while len(d) < 48:
+        di = hashlib.md5(di + passphrase + salt).digest()
+        d += di
+    key, iv = d[:32], d[32:48]
+    cipher = AES.new(key, AES.MODE_CBC, iv)
+    decrypted = cipher.decrypt(encrypted)
+    decrypted = decrypted[: -decrypted[-1]]  # Remove PKCS7 padding
+    return json.loads(decrypted.decode("utf-8"))
 
-    # Look for "Coal PLF" text near a percentage value
-    text = soup.get_text(" ", strip=True)
-    plf_patterns = [
-        r"Coal\s+PLF[:\s]+(\d+\.?\d*)\s*%",
-        r"PLF\s*\(Coal\)[:\s]+(\d+\.?\d*)",
-        r"(\d{2}\.\d{1,2})\s*%.*?Coal\s+PLF",
-    ]
-    for pat in plf_patterns:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            return round(float(m.group(1)), 2)
 
-    return None
+def _fetch_coal_plf_range(start: date, end: date) -> list:
+    """Fetch daily coal PLF for a date window. Returns sorted [(date, plf), ...]."""
+    body = {
+        "parameter": ["plantLoadFactor"],
+        "paramObj": _PLF_PARAM_OBJ,
+        "dualObj": [],
+        "dual": False,
+        "source": ["coal"],
+        "compare": [],
+        "filter": [],
+        "analyticsType": "",
+        "startDate": start.strftime("%Y-%m-%d"),
+        "endDate": end.strftime("%Y-%m-%d"),
+        "rangeType": "day",
+    }
+    resp = SESSION.post(_ICED_API_URL, json=body, headers=_ICED_HEADERS, timeout=30)
+    resp.raise_for_status()
+    data = _decrypt_iced(resp.text)
+    rows = []
+    for item in data[0].get("data", []):
+        d = date.fromisoformat(item["_id"]["year"])
+        v = item.get("total")
+        if v is not None:
+            rows.append((d, round(float(v), 2)))
+    return sorted(rows)
 
 
 def scrape_coal_plf(target_date: date | None = None) -> bool:
     if target_date is None:
-        target_date = date.today() - timedelta(days=1)
+        target_date = date.today()
 
     csv_path = CSV_PATHS["coal_plf"]
     last = _last_date_in_csv(csv_path)
-    if last and last >= target_date:
-        print(f"[NITI-PLF] Data for {target_date} already present. Skipping.")
-        return True
 
-    print(f"[NITI-PLF] Fetching Coal PLF for {target_date}...")
-    plf = _scrape_coal_plf(target_date)
-
-    if plf is None:
-        print(f"[NITI-PLF] ERROR: Could not fetch Coal PLF for {target_date}.")
+    # Fetch last 30 days — covers the ~7-day data lag on ICED NITI
+    end = target_date
+    start = end - timedelta(days=29)
+    print(f"[NITI-PLF] Fetching coal PLF {start} → {end}...")
+    try:
+        rows = _fetch_coal_plf_range(start, end)
+    except Exception as e:
+        print(f"[NITI-PLF] API error: {e}")
         return False
 
-    row = [_format_date_dd_mm_yy(target_date), plf]
-    print(f"[NITI-PLF] Writing: {row}")
-    with open(csv_path, "a", newline="") as f:
-        csv.writer(f).writerow(row)
+    # Use set of existing dates to safely skip duplicates (handles trailing empty rows)
+    existing = set()
+    p = Path(csv_path)
+    if p.exists():
+        with open(p, newline="") as f:
+            for row in csv.reader(f):
+                fields = [x.strip() for x in row if x.strip()]
+                if len(fields) < 2:
+                    continue
+                try:
+                    parts = fields[0].split("/")
+                    if len(parts) == 3:
+                        dy, dm, yr = parts
+                        yr = int(yr)
+                        if yr < 100:
+                            yr += 2000
+                        existing.add(date(yr, int(dm), int(dy)))
+                except Exception:
+                    pass
 
-    print(f"[NITI-PLF] Done for {target_date}.")
+    new_rows = [(d, v) for d, v in rows if d not in existing]
+    if not new_rows:
+        print(f"[NITI-PLF] Already up to date (last={last}).")
+        return True
+
+    with open(csv_path, "a", newline="") as f:
+        w = csv.writer(f)
+        for d, v in new_rows:
+            row = [_format_date_dd_mm_yy(d), v]
+            print(f"[NITI-PLF] Writing: {row}")
+            w.writerow(row)
+
+    print(f"[NITI-PLF] Done. Wrote {len(new_rows)} rows.")
     return True
 
 
