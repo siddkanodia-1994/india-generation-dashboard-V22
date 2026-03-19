@@ -216,8 +216,11 @@ export default function App() {
               calcMode="avg"
               valueDisplay={{
                 suffix: "%",
-                decimals: 2,
+                decimals: 0,
               }}
+              extraBadgeCols={[]}
+              showYoyBadge={true}
+              hideMainBadgeLabel={true}
             />
           </TabPanel>
 

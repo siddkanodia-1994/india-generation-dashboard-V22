@@ -631,6 +631,7 @@ export type ElectricityDashboardProps = {
   extraBadgeCols?: { key: string; label: string; isText?: boolean }[];
   extraBadgeCsvPath?: string;
   hideMainBadge?: boolean;
+  hideMainBadgeLabel?: boolean;
   showYoyBadge?: boolean;
 };
 
@@ -659,6 +660,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
     extraBadgeCols,
     extraBadgeCsvPath,
     hideMainBadge,
+    hideMainBadgeLabel,
     showYoyBadge,
   } = props;
 
@@ -1565,7 +1567,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
               {!hideMainBadge && kpis.latest && (
                 <div className="rounded-xl bg-white px-4 py-2 ring-1 ring-slate-200 text-center">
                   <div className="text-lg font-bold text-slate-900">{fmtValue(kpis.latest.value)}</div>
-                  <div className="text-xs text-slate-500">Avg · {unitLabel}</div>
+                  {!hideMainBadgeLabel && <div className="text-xs text-slate-500">Avg · {unitLabel}</div>}
                 </div>
               )}
               {extraBadgeCols.map(({ key, label, isText }) => {
