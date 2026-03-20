@@ -70,6 +70,7 @@ export default function App() {
                   }}
                   extraBadgeCols={[]}
                   showYoyBadge={true}
+                  mainBadgeLabel="Total"
                 />
               </TabPanel>
 
@@ -90,6 +91,7 @@ export default function App() {
                   }}
                   extraBadgeCols={[]}
                   showYoyBadge={true}
+                  mainBadgeLabel="Total"
                 />
               </TabPanel>
 
@@ -110,6 +112,7 @@ export default function App() {
                   }}
                   extraBadgeCols={[]}
                   showYoyBadge={true}
+                  mainBadgeLabel="Total"
                 />
               </TabPanel>
             </Tabs>
@@ -215,6 +218,7 @@ export default function App() {
               }}
               extraBadgeCols={[]}
               showYoyBadge={true}
+              mainBadgeLabel="Total"
             />
           </TabPanel>
 
