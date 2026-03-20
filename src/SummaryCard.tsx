@@ -281,11 +281,19 @@ async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
   const fromIso = fromDate.toISOString().slice(0, 10);
 
   const query = encodeURIComponent("India power electricity demand coal solar wind RTM");
-  const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=en-IN&gl=IN&ceid=IN:en`;
+  const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=en-IN&gl=IN&ceid=IN:en&cb=${Date.now()}`;
   const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(rssUrl)}`;
 
-  const res = await fetch(proxyUrl);
-  const text = await res.text();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000); // 12s timeout
+  let text: string;
+  try {
+    const res = await fetch(proxyUrl, { signal: controller.signal });
+    if (!res.ok) throw new Error("RSS fetch failed");
+    text = await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
   const parser = new DOMParser();
   const doc = parser.parseFromString(text, "application/xml");
   const powerTerms = ["power", "electricity", "energy", "coal", "solar", "wind", "rtm", "dam", "grid", "demand", "supply", "generation", "thermal", "renewable"];
@@ -301,7 +309,7 @@ async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
     const pubDate = new Date(pubDateStr);
     if (isNaN(pubDate.getTime())) continue;
     const pubIso = pubDate.toISOString().slice(0, 10);
-    if (pubIso < fromIso || pubIso > toIso) continue;
+    if (pubIso < fromIso) continue;
     // Filter on title + snippet + source combined (wider net)
     const hay = `${title} ${snippet} ${source}`.toLowerCase();
     if (!hay.includes("india") && !hay.includes("indian")) continue;
