@@ -680,7 +680,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   const isAvgTab = calcMode === "avg";
   const isPeakDemandTab = type === "demand"; // ✅ Peak Demand Met tab identifier
 
-  const [showDecimal, setShowDecimal] = useState(false);
+  const [showDecimal, setShowDecimal] = useState(true);
   const effectiveDecimals = type === "coal-plf" && showDecimal ? 1 : valueDisplay.decimals;
 
   const fmtValue = (x: number | null | undefined) => {
