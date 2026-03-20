@@ -23,7 +23,7 @@ const FEEDS = [
   GN("India solar wind renewable energy NTPC IEX RTM DAM tariff capacity"),
   GN("India peak demand power shortage thermal hydro PLF generation"),
   // Google News queries — targeted (surfaces ET Energy & high-quality power articles)
-  GN("India peak power demand summer GW CEA ministry coal availability"),
+  GN("India 270 GW peak demand power minister summer 2026"),
   GN("India electricity tariff RTM DAM IEX power purchase coal stock"),
 
   // Indian energy publications with working RSS

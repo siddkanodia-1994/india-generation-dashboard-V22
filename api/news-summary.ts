@@ -33,7 +33,7 @@ const GN_FEEDS = [
   GN("India power electricity sector coal discom grid demand generation"),
   GN("India solar wind renewable energy NTPC IEX RTM DAM tariff capacity"),
   GN("India peak demand power shortage thermal hydro PLF generation"),
-  GN("India peak power demand summer GW CEA ministry coal availability"),
+  GN("India 270 GW peak demand power minister summer 2026"),
   GN("India electricity tariff RTM DAM IEX power purchase coal stock"),
 ];
 
