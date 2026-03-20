@@ -413,7 +413,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
     const ytdSupCurr = rangeSum(supplyMap, ytdStart, ref);
     const ytdSupPrior = rangeSum(supplyMap, `${fyStartYear - 1}-04-01`, isoMinusDays(ref, 365));
     const ytdYoy = growthPct(ytdSupCurr, ytdSupPrior);
-    const fyLabel = `Apr ${fyStartYear} – ${monthLabel(pm1.y, pm1.m)}`;
+    const fyLabel = `Apr ${fyStartYear} – ${monthLabel(year, month)}`;
 
     // RTM WoW
     const avg30WoW = growthPct(rtm.avg30, rtm.prev30);
