@@ -9,7 +9,7 @@ type NewsItem = {
   snippet: string;
 };
 
-const CACHE_KEY = "latestNews_cache_v4";
+const CACHE_KEY = "latestNews_cache_v5"; // bumped to clear stale empty caches
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const MIN_DATE = "2015-01-01";
 
@@ -29,6 +29,26 @@ const POWER_TERMS = [
   "discom",
   "tariff",
   "energy",
+  "rtm",
+  "dam",
+  "iex",
+  "thermal",
+  "hydro",
+  "capacity",
+  "generation",
+  "shortage",
+  "ntpc",
+  "nhpc",
+  "genco",
+  "ppa",
+  "mw",
+  "gw",
+];
+
+// CORS proxies — tried in order until one returns XML items
+const PROXIES = [
+  "https://api.allorigins.win/raw?url=",
+  "https://corsproxy.io/?",
 ];
 
 function isoDate(d: Date) {
@@ -75,6 +95,7 @@ function loadCache(): NewsItem[] | null {
     if (!obj || typeof obj !== "object") return null;
     if (typeof obj.ts !== "number" || !Array.isArray(obj.items)) return null;
     if (Date.now() - obj.ts > CACHE_TTL_MS) return null;
+    if (obj.items.length === 0) return null; // don't use cached empty results
     return obj.items as NewsItem[];
   } catch {
     return null;
@@ -82,6 +103,7 @@ function loadCache(): NewsItem[] | null {
 }
 
 function saveCache(items: NewsItem[]) {
+  if (items.length === 0) return; // never cache empty results
   try {
     localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), items }));
   } catch {
@@ -90,21 +112,37 @@ function saveCache(items: NewsItem[]) {
 }
 
 async function fetchGoogleNewsRSS(forceFresh: boolean): Promise<NewsItem[]> {
+  // Simpler query — Google News RSS parses this more reliably than complex OR syntax
   const rss =
     "https://news.google.com/rss/search?q=" +
     encodeURIComponent(
-      "(India power sector OR India electricity OR India power demand OR India power supply OR India peak demand OR India renewable energy OR India grid OR India discom OR India transmission)"
+      "India power electricity energy sector coal renewable discom grid demand generation"
     ) +
     "&hl=en-IN&gl=IN&ceid=IN:en";
 
-  // ✅ AllOrigins proxy; add cache-busting when forceFresh=true
   const cb = forceFresh ? `&cb=${Date.now()}` : "";
-  const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(rss)}${cb}`;
 
-  const res = await fetch(proxy);
-  if (!res.ok) throw new Error("RSS fetch failed");
+  let xmlText = "";
 
-  const xmlText = await res.text();
+  // Try each proxy in order; use first one that returns parseable XML with items
+  for (const proxyBase of PROXIES) {
+    try {
+      const proxyUrl = `${proxyBase}${encodeURIComponent(rss)}${cb}`;
+      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
+      if (!res.ok) continue;
+      const text = await res.text();
+      // Quick sanity check — valid RSS has <item> tags
+      if (text.includes("<item>")) {
+        xmlText = text;
+        break;
+      }
+    } catch {
+      // try next proxy
+    }
+  }
+
+  if (!xmlText) throw new Error("All proxies failed or returned no items");
+
   const xml = new DOMParser().parseFromString(xmlText, "text/xml");
   const items = Array.from(xml.querySelectorAll("item"));
 
@@ -168,9 +206,9 @@ export default function LatestNews() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Defaults: End=today, Start=today-7
+  // Defaults: End=today, Start=today-14 (widened from 7)
   const [endDate, setEndDate] = useState<string>(() => todayISODate());
-  const [startDate, setStartDate] = useState<string>(() => daysBeforeISO(todayISODate(), 7));
+  const [startDate, setStartDate] = useState<string>(() => daysBeforeISO(todayISODate(), 14));
 
   const todayMax = todayISODate();
 
@@ -184,7 +222,6 @@ export default function LatestNews() {
   }, [endDate]);
 
   const filtered = useMemo(() => {
-    // ✅ Use LOCAL day boundaries (no "Z") to match what users expect on the UI calendar
     const fromT = new Date(startDate + "T00:00:00").getTime();
     const toT = new Date(endDate + "T23:59:59").getTime();
 
@@ -214,9 +251,8 @@ export default function LatestNews() {
       const relevant = raw.filter(isRelevant).slice(0, 100);
 
       setItems(relevant);
-      saveCache(relevant);
+      saveCache(relevant); // only saves if relevant.length > 0
     } catch {
-      // Only set error; UI will display it only when no data (see below)
       setError("Unable to load news – please try again later");
     } finally {
       setLoading(false);
@@ -227,9 +263,9 @@ export default function LatestNews() {
     load(false);
   }, []);
 
-  function setLast7DaysPreset() {
+  function setLast14DaysPreset() {
     const end = todayISODate();
-    const start = daysBeforeISO(end, 7);
+    const start = daysBeforeISO(end, 14);
     setEndDate(end);
     setStartDate(start);
   }
@@ -262,13 +298,13 @@ export default function LatestNews() {
             right={
               <div className="flex items-center gap-2">
                 <button
-                  onClick={setLast7DaysPreset}
+                  onClick={setLast14DaysPreset}
                   className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
                 >
-                  Last 7 Days
+                  Last 14 Days
                 </button>
                 <button
-                  onClick={setLast7DaysPreset}
+                  onClick={setLast14DaysPreset}
                   className="rounded-xl bg-white px-3 py-2 text-sm font-semibold text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
                 >
                   Reset
@@ -319,7 +355,7 @@ export default function LatestNews() {
           </Card>
         </div>
 
-        {/* ✅ show error only if we have nothing to display */}
+        {/* show error only if we have nothing to display */}
         {error && filtered.length === 0 ? (
           <div className="mt-6 rounded-2xl bg-rose-50 p-4 text-rose-800 ring-1 ring-rose-200">
             <div className="font-semibold">{error}</div>
