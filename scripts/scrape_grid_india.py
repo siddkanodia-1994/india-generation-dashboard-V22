@@ -25,6 +25,12 @@ from pathlib import Path
 
 import requests
 
+try:
+    from curl_cffi import requests as curl_requests
+    _USE_CURL = True
+except ImportError:
+    _USE_CURL = False
+
 sys.path.insert(0, str(Path(__file__).parent))
 from config import CSV_PATHS, GRID_INDIA_REPORTS_URL, GRID_INDIA_PDF_BASE
 
@@ -104,6 +110,15 @@ def _append_csv(path: str, row: list) -> None:
 
 
 # ── Excel URL discovery via Grid India REST API ────────────────────────────────
+def _api_post(url, json, headers, timeout=30):
+    """POST helper that uses curl_cffi (Chrome TLS fingerprint) when available."""
+    if _USE_CURL:
+        return curl_requests.post(url, json=json, headers=headers,
+                                  timeout=timeout, impersonate="chrome110",
+                                  verify=False)
+    return requests.post(url, json=json, headers=headers, timeout=timeout)
+
+
 # Grid India exposes an undocumented REST API at webapi.grid-india.in that returns
 # file listings. The CDN (webcdn.grid-india.in) serves files directly without any
 # browser or IP restrictions — no Playwright needed.
@@ -125,7 +140,7 @@ def _find_excel_url(target_date: date):
     items = None
     for attempt in range(1, 4):  # up to 3 attempts
         try:
-            resp = requests.post(
+            resp = _api_post(
                 _GRID_API_FILE_URL,
                 json={"_source": "GRDW", "_type": "DAILY_PSP_REPORT",
                       "_fileDate": fy, "_month": month},
@@ -179,7 +194,7 @@ def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
     for fy, month in sorted(fy_months):
         print(f"[GRID-API] Fetching FY={fy} month={month}...")
         try:
-            resp = requests.post(
+            resp = _api_post(
                 _GRID_API_FILE_URL,
                 json={"_source": "GRDW", "_type": "DAILY_PSP_REPORT",
                       "_fileDate": fy, "_month": month},
