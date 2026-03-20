@@ -45,11 +45,8 @@ const POWER_TERMS = [
   "gw",
 ];
 
-// CORS proxies — tried in order until one returns XML items
-const PROXIES = [
-  "https://api.allorigins.win/raw?url=",
-  "https://corsproxy.io/?",
-];
+// Server-side proxy via Vercel Edge Function (no CORS issues)
+const NEWS_API = "/api/news";
 
 function isoDate(d: Date) {
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000)
@@ -112,36 +109,12 @@ function saveCache(items: NewsItem[]) {
 }
 
 async function fetchGoogleNewsRSS(forceFresh: boolean): Promise<NewsItem[]> {
-  // Simpler query — Google News RSS parses this more reliably than complex OR syntax
-  const rss =
-    "https://news.google.com/rss/search?q=" +
-    encodeURIComponent(
-      "India power electricity energy sector coal renewable discom grid demand generation"
-    ) +
-    "&hl=en-IN&gl=IN&ceid=IN:en";
+  const url = forceFresh ? `${NEWS_API}?cb=${Date.now()}` : NEWS_API;
+  const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+  if (!res.ok) throw new Error("News API failed");
 
-  const cb = forceFresh ? `&cb=${Date.now()}` : "";
-
-  let xmlText = "";
-
-  // Try each proxy in order; use first one that returns parseable XML with items
-  for (const proxyBase of PROXIES) {
-    try {
-      const proxyUrl = `${proxyBase}${encodeURIComponent(rss)}${cb}`;
-      const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(10000) });
-      if (!res.ok) continue;
-      const text = await res.text();
-      // Quick sanity check — valid RSS has <item> tags
-      if (text.includes("<item>")) {
-        xmlText = text;
-        break;
-      }
-    } catch {
-      // try next proxy
-    }
-  }
-
-  if (!xmlText) throw new Error("All proxies failed or returned no items");
+  const xmlText = await res.text();
+  if (!xmlText.includes("<item>")) throw new Error("No items in RSS response");
 
   const xml = new DOMParser().parseFromString(xmlText, "text/xml");
   const items = Array.from(xml.querySelectorAll("item"));
