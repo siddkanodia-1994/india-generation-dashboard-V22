@@ -267,7 +267,7 @@ type NewsItem = { title: string; url: string; source: string; publishedAtISO: st
 const NEWS_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
 
 async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
-  const cacheKey = `pwr_news_v3_${toIso}`;
+  const cacheKey = `pwr_news_v4_${toIso}`;
   try {
     const cached = localStorage.getItem(cacheKey);
     if (cached) {
@@ -276,41 +276,18 @@ async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
     }
   } catch { /* ignore */ }
 
-  const fromDate = new Date(toIso + "T00:00:00Z");
-  fromDate.setUTCDate(fromDate.getUTCDate() - 10);
-  const fromIso = fromDate.toISOString().slice(0, 10);
-
-  // Use the Vercel Edge Function (server-side, no CORS proxy needed)
-  const res = await fetch(`/api/news?cb=${Date.now()}`);
+  // Dedicated endpoint — fetches RSS + generates AI summaries server-side
+  const res = await fetch(`/api/news-summary?cb=${Date.now()}`);
   if (!res.ok) throw new Error("News API failed");
-  const text = await res.text();
+  const data = await res.json() as { items: Array<{ title: string; url: string; source: string; publishedAtISO: string; summary: string }> };
+  const items: NewsItem[] = (data.items ?? []).map((i) => ({
+    title: i.title,
+    url: i.url,
+    source: i.source,
+    publishedAtISO: i.publishedAtISO,
+    snippet: i.summary,
+  }));
 
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(text, "application/xml");
-  const powerTerms = ["power", "electricity", "energy", "coal", "solar", "wind", "rtm", "dam", "grid", "demand", "supply", "generation", "thermal", "renewable", "discom", "ntpc", "iex", "tariff", "capacity", "plf"];
-  const allItems: NewsItem[] = [];
-
-  for (const item of Array.from(doc.querySelectorAll("item"))) {
-    const title = item.querySelector("title")?.textContent?.trim() ?? "";
-    const link = item.querySelector("link")?.textContent?.trim() ?? "";
-    const pubDateStr = item.querySelector("pubDate")?.textContent?.trim() ?? "";
-    const source = item.querySelector("source")?.textContent?.trim() ?? "";
-    const rawDesc = item.querySelector("description")?.textContent ?? "";
-    const snippet = rawDesc.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 400);
-    const pubDate = new Date(pubDateStr);
-    if (isNaN(pubDate.getTime())) continue;
-    const pubIso = pubDate.toISOString().slice(0, 10);
-    if (pubIso < fromIso) continue;
-    const hay = `${title} ${snippet} ${source}`.toLowerCase();
-    // Reject clearly non-India content; India-specific sources don't always self-reference "india"
-    const isNonIndia = /\b(china|pakistan|usa|europe|africa|australia|germany|france)\b/.test(hay) &&
-      !hay.includes("india") && !hay.includes("indian");
-    if (isNonIndia) continue;
-    if (!powerTerms.some((t) => hay.includes(t))) continue;
-    allItems.push({ title, url: link, source, publishedAtISO: pubDate.toISOString(), snippet });
-  }
-
-  const items = allItems.slice(0, 5);
   if (items.length > 0) {
     try {
       localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), items }));
@@ -581,13 +558,13 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
   async function downloadPDF() {
     const element = document.getElementById("summary-printable");
     if (!element) return;
-    // Hide controls (date picker + buttons) before capture
-    const controls = element.querySelector<HTMLElement>(".no-print");
-    if (controls) controls.style.visibility = "hidden";
+    // Hide all no-print elements (toggle button, section wrapper when off, etc.)
+    const noPrints = Array.from(element.querySelectorAll<HTMLElement>(".no-print"));
+    noPrints.forEach((el) => (el.style.visibility = "hidden"));
     const html2canvas = (await import("html2canvas")).default;
     const { jsPDF } = await import("jspdf");
     const canvas = await html2canvas(element, { scale: 2, useCORS: true });
-    if (controls) controls.style.visibility = "";
+    noPrints.forEach((el) => (el.style.visibility = ""));
     const imgData = canvas.toDataURL("image/png");
     const pdf = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
     const pageW = pdf.internal.pageSize.getWidth();
@@ -864,7 +841,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
         </div>
 
         {/* ── Key Power Updates ── */}
-        <div>
+        <div className={showNews ? "" : "no-print"}>
           <div className="flex items-center justify-between gap-3 bg-blue-50 border-l-4 border-blue-400 px-3 py-1.5">
             <div className="text-sm font-semibold text-blue-800">
               Other key developments in the Indian power sector — Last 10 days as on {formatDisplayDate(selectedDate)}
