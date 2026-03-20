@@ -262,12 +262,12 @@ function upDown(curr: number | null, prev: number | null): string {
 
 // ── News fetching ─────────────────────────────────────────────────────────────
 
-type NewsItem = { title: string; url: string; source: string; publishedAtISO: string };
+type NewsItem = { title: string; url: string; source: string; publishedAtISO: string; snippet: string };
 
 const NEWS_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
 
 async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
-  const cacheKey = `pwr_news_${toIso}`;
+  const cacheKey = `pwr_news_v2_${toIso}`;
   try {
     const cached = localStorage.getItem(cacheKey);
     if (cached) {
@@ -288,25 +288,28 @@ async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
   const text = await res.text();
   const parser = new DOMParser();
   const doc = parser.parseFromString(text, "application/xml");
-  const items: NewsItem[] = [];
+  const powerTerms = ["power", "electricity", "energy", "coal", "solar", "wind", "rtm", "dam", "grid", "demand", "supply", "generation", "thermal", "renewable"];
+  const allItems: NewsItem[] = [];
 
   for (const item of Array.from(doc.querySelectorAll("item"))) {
     const title = item.querySelector("title")?.textContent?.trim() ?? "";
     const link = item.querySelector("link")?.textContent?.trim() ?? "";
     const pubDateStr = item.querySelector("pubDate")?.textContent?.trim() ?? "";
     const source = item.querySelector("source")?.textContent?.trim() ?? "";
+    const rawDesc = item.querySelector("description")?.textContent ?? "";
+    const snippet = rawDesc.replace(/<[^>]+>/g, "").trim().slice(0, 200);
     const pubDate = new Date(pubDateStr);
     if (isNaN(pubDate.getTime())) continue;
     const pubIso = pubDate.toISOString().slice(0, 10);
     if (pubIso < fromIso || pubIso > toIso) continue;
-    const lower = title.toLowerCase();
-    if (!lower.includes("india") && !lower.includes("indian")) continue;
-    const powerTerms = ["power", "electricity", "energy", "coal", "solar", "wind", "rtm", "dam", "grid", "demand", "supply", "generation", "thermal", "renewable"];
-    if (!powerTerms.some((t) => lower.includes(t))) continue;
-    items.push({ title, url: link, source, publishedAtISO: pubDate.toISOString() });
-    if (items.length >= 8) break;
+    // Filter on title + snippet + source combined (wider net)
+    const hay = `${title} ${snippet} ${source}`.toLowerCase();
+    if (!hay.includes("india") && !hay.includes("indian")) continue;
+    if (!powerTerms.some((t) => hay.includes(t))) continue;
+    allItems.push({ title, url: link, source, publishedAtISO: pubDate.toISOString(), snippet });
   }
 
+  const items = allItems.slice(0, 8);
   try {
     localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), items }));
   } catch { /* ignore */ }
@@ -875,15 +878,20 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
                 <div key={i} className="flex gap-2 text-sm">
                   <span className="text-slate-400 font-semibold shrink-0">{i + 1}.</span>
                   <span>
-                    <a
-                      href={item.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-slate-800 hover:text-blue-700 hover:underline"
-                    >
-                      {item.title}
-                    </a>
-                    <span className="text-xs text-slate-500 ml-1">— {item.source} · {dateStr}</span>
+                    <div>
+                      <a
+                        href={item.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-slate-800 hover:text-blue-700 hover:underline font-medium"
+                      >
+                        {item.title}
+                      </a>
+                      <span className="text-xs text-slate-500 ml-1">— {item.source} · {dateStr}</span>
+                      {item.snippet && (
+                        <p className="text-xs text-slate-500 mt-0.5 leading-snug">{item.snippet}</p>
+                      )}
+                    </div>
                   </span>
                 </div>
               );

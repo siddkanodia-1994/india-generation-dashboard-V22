@@ -680,12 +680,15 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   const isAvgTab = calcMode === "avg";
   const isPeakDemandTab = type === "demand"; // ✅ Peak Demand Met tab identifier
 
+  const [showDecimal, setShowDecimal] = useState(false);
+  const effectiveDecimals = type === "coal-plf" && showDecimal ? 1 : valueDisplay.decimals;
+
   const fmtValue = (x: number | null | undefined) => {
     if (x == null || Number.isNaN(x)) return "—";
-    const rounded = Number(x.toFixed(valueDisplay.decimals));
+    const rounded = Number(x.toFixed(effectiveDecimals));
     return `${new Intl.NumberFormat("en-IN", {
-      minimumFractionDigits: valueDisplay.decimals,
-      maximumFractionDigits: valueDisplay.decimals,
+      minimumFractionDigits: effectiveDecimals,
+      maximumFractionDigits: effectiveDecimals,
     }).format(rounded)}${valueDisplay.suffix}`;
   };
 
@@ -1752,6 +1755,17 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                             />
                             <span className="font-medium">Show Control Lines</span>
                           </label>
+                          {type === "coal-plf" && (
+                            <label className="flex items-center gap-2 text-[12px] text-slate-700 cursor-pointer select-none">
+                              <input
+                                type="checkbox"
+                                checked={showDecimal}
+                                onChange={(e) => setShowDecimal(e.target.checked)}
+                                className="h-4 w-4 rounded border-slate-300"
+                              />
+                              <span className="font-medium">Show 1 decimal</span>
+                            </label>
+                          )}
                         </div>
 
                         <div className="mt-2 grid grid-cols-2 gap-2 text-[12px] text-slate-700">
@@ -1863,9 +1877,9 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                             const n = asFiniteNumber(v);
                             if (n == null) return "—";
                             return new Intl.NumberFormat("en-IN", {
-                              minimumFractionDigits: valueDisplay.decimals,
-                              maximumFractionDigits: valueDisplay.decimals,
-                            }).format(Number(n.toFixed(valueDisplay.decimals)));
+                              minimumFractionDigits: effectiveDecimals,
+                              maximumFractionDigits: effectiveDecimals,
+                            }).format(Number(n.toFixed(effectiveDecimals)));
                           }}
                         />
                       ) : null}
@@ -2304,9 +2318,9 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                           const n = asFiniteNumber(v);
                           if (n == null) return "—";
                           return new Intl.NumberFormat("en-IN", {
-                            minimumFractionDigits: valueDisplay.decimals,
-                            maximumFractionDigits: valueDisplay.decimals,
-                          }).format(Number(n.toFixed(valueDisplay.decimals)));
+                            minimumFractionDigits: effectiveDecimals,
+                            maximumFractionDigits: effectiveDecimals,
+                          }).format(Number(n.toFixed(effectiveDecimals)));
                         }}
                       />
 
