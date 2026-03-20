@@ -10,7 +10,7 @@ import SummaryCard from "./SummaryCard";
 
 export default function App() {
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className="min-h-screen" style={{ backgroundColor: "#eef2f7" }}>
       <div className="mx-auto max-w-7xl px-4 pt-4">
         <Tabs defaultIndex={5}>
           <div className="mt-2">
