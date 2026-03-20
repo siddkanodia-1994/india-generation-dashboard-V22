@@ -1,36 +1,33 @@
 /**
  * Vercel Edge Function — /api/news
  *
- * Fetches 4 RSS feeds in parallel (2 Google News queries + ET Energy + Mercom India),
- * merges all <item> blocks, and returns a single RSS envelope for the frontend to parse.
+ * Fetches 7 RSS feeds in parallel (India power sector focus) and returns
+ * a merged RSS envelope for the frontend to parse with DOMParser.
  *
- * NOTE: Edge runtime does NOT have DOMParser — item extraction uses string matching.
+ * NOTE: Edge runtime has no DOMParser — item extraction uses string matching.
+ * Handles both RSS (<item>) and Atom (<entry>) formats.
  *
- * Vercel caches the response for 30 min at the edge (s-maxage=1800).
+ * Vercel caches 30 min at edge (s-maxage=1800).
  */
 
 export const config = { runtime: "edge" };
 
+const GN = (q: string) =>
+  "https://news.google.com/rss/search?q=" +
+  encodeURIComponent(q) +
+  "&hl=en-IN&gl=IN&ceid=IN:en";
+
 const FEEDS = [
-  // Google News — broad India power sector query
-  "https://news.google.com/rss/search?q=" +
-    encodeURIComponent(
-      "India power electricity sector coal discom grid demand generation"
-    ) +
-    "&hl=en-IN&gl=IN&ceid=IN:en",
+  // Google News queries — India-targeted
+  GN("India power electricity sector coal discom grid demand generation"),
+  GN("India solar wind renewable energy NTPC IEX RTM DAM tariff capacity"),
+  GN("India peak demand power shortage thermal hydro PLF generation"),
 
-  // Google News — specific technologies & market terms
-  "https://news.google.com/rss/search?q=" +
-    encodeURIComponent(
-      "India solar wind renewable NTPC IEX RTM DAM generation energy tariff"
-    ) +
-    "&hl=en-IN&gl=IN&ceid=IN:en",
-
-  // Economic Times — Energy section (India-specific, always relevant)
+  // Indian energy publications (always India-specific — no need for "india" in title)
   "https://economictimes.indiatimes.com/industry/energy/rss",
-
-  // Mercom India — renewable energy / solar focus
   "https://mercomindia.com/feed/",
+  "https://www.business-standard.com/rss/power-sector-12.rss",
+  "https://powerline.net.in/feed/",
 ];
 
 const FETCH_HEADERS = {
@@ -38,14 +35,33 @@ const FETCH_HEADERS = {
   Accept: "application/rss+xml, application/xml, text/xml, */*",
 };
 
-/** Extract all <item>…</item> blocks from an XML string */
+/** Extract all <item> or <entry> blocks from an XML/Atom string, normalising to <item> */
 function extractItems(xml: string): string {
-  const matches = [...xml.matchAll(/<item[\s>][\s\S]*?<\/item>/gi)];
-  return matches.map((m) => m[0]).join("\n");
+  // Standard RSS <item>
+  const rssItems = [...xml.matchAll(/<item[\s>][\s\S]*?<\/item>/gi)].map((m) => m[0]);
+
+  // Atom <entry> — convert to <item> so frontend parser handles it uniformly
+  const atomItems = [...xml.matchAll(/<entry[\s>][\s\S]*?<\/entry>/gi)].map((m) => {
+    const entry = m[0];
+    // Extract key fields
+    const title = entry.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "";
+    const link =
+      entry.match(/<link[^>]+href="([^"]+)"/i)?.[1] ??
+      entry.match(/<link[^>]*>([\s\S]*?)<\/link>/i)?.[1] ?? "";
+    const pubDate =
+      entry.match(/<published>([\s\S]*?)<\/published>/i)?.[1] ??
+      entry.match(/<updated>([\s\S]*?)<\/updated>/i)?.[1] ?? "";
+    const summary =
+      entry.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i)?.[1] ??
+      entry.match(/<content[^>]*>([\s\S]*?)<\/content>/i)?.[1] ?? "";
+    const source = entry.match(/<author[^>]*>[\s\S]*?<name>([\s\S]*?)<\/name>/i)?.[1] ?? "";
+    return `<item><title>${title}</title><link>${link}</link><pubDate>${pubDate}</pubDate><source>${source}</source><description>${summary}</description></item>`;
+  });
+
+  return [...rssItems, ...atomItems].join("\n");
 }
 
 export default async function handler(): Promise<Response> {
-  // Fetch all feeds in parallel; individual failures are tolerated
   const results = await Promise.allSettled(
     FEEDS.map((url) =>
       fetch(url, { headers: FETCH_HEADERS }).then((r) => {
@@ -55,12 +71,13 @@ export default async function handler(): Promise<Response> {
     )
   );
 
-  const allItems = results
-    .filter((r): r is PromiseFulfilledResult<string> => r.status === "fulfilled")
-    .map((r) => extractItems(r.value))
-    .join("\n");
+  const succeeded = results.filter(
+    (r): r is PromiseFulfilledResult<string> => r.status === "fulfilled"
+  );
 
-  if (!allItems.includes("<item")) {
+  const allItems = succeeded.map((r) => extractItems(r.value)).join("\n");
+
+  if (!allItems.trim()) {
     return new Response("No items found across all feeds", { status: 502 });
   }
 

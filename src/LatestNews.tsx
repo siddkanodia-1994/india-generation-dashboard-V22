@@ -9,7 +9,7 @@ type NewsItem = {
   snippet: string;
 };
 
-const CACHE_KEY = "latestNews_cache_v5"; // bumped to clear stale empty caches
+const CACHE_KEY = "latestNews_cache_v6"; // bumped to clear stale caches
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const MIN_DATE = "2015-01-01";
 
@@ -79,9 +79,13 @@ function clamp(text = "", n = 180) {
 
 function isRelevant(item: NewsItem) {
   const hay = `${item.title} ${item.snippet} ${item.source}`.toLowerCase();
-  const mentionsIndia = hay.includes("india") || hay.includes("indian");
+  // India check skipped — all our RSS sources are India-targeted
+  // (India-specific publications don't always say "india" in their own articles)
   const mentionsPower = POWER_TERMS.some((t) => hay.includes(t));
-  return mentionsIndia && mentionsPower;
+  // Reject clearly non-India content
+  const isNonIndia = /\b(china|pakistan|usa|europe|africa|australia|uk |united kingdom|germany|france)\b/.test(hay) &&
+    !hay.includes("india") && !hay.includes("indian");
+  return mentionsPower && !isNonIndia;
 }
 
 function loadCache(): NewsItem[] | null {
