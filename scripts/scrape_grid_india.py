@@ -35,8 +35,11 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-IN,en;q=0.9",
+    "Content-Type": "application/json",
+    "Origin": "https://grid-india.in",
+    "Referer": "https://grid-india.in/en/reports/daily-psp-report",
 }
 
 
@@ -119,18 +122,25 @@ def _find_excel_url(target_date: date):
     date_prefix  = target_date.strftime("%d.%m.%y") # e.g. "18.03.26"
 
     print(f"[GRID] Querying Grid India API for {target_date} (FY={fy}, month={month})...")
-    try:
-        resp = requests.post(
-            _GRID_API_FILE_URL,
-            json={"_source": "GRDW", "_type": "DAILY_PSP_REPORT",
-                  "_fileDate": fy, "_month": month},
-            headers=HEADERS,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        items = resp.json().get("retData") or []
-    except Exception as e:
-        print(f"[GRID] API error: {e}")
+    items = None
+    for attempt in range(1, 4):  # up to 3 attempts
+        try:
+            resp = requests.post(
+                _GRID_API_FILE_URL,
+                json={"_source": "GRDW", "_type": "DAILY_PSP_REPORT",
+                      "_fileDate": fy, "_month": month},
+                headers=HEADERS,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            items = resp.json().get("retData") or []
+            break
+        except Exception as e:
+            print(f"[GRID] API error (attempt {attempt}/3): {e}")
+            if attempt < 3:
+                import time as _time
+                _time.sleep(5 * attempt)  # 5s, 10s back-off
+    if items is None:
         return None
 
     for item in items:
