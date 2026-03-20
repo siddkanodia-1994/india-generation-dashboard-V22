@@ -212,9 +212,9 @@ function dedup(items: Item[]): Item[] {
 }
 
 export default async function handler(): Promise<Response> {
-  // Date range: last 30 days
+  // Date range: last 14 days
   const fromDate = new Date();
-  fromDate.setUTCDate(fromDate.getUTCDate() - 30);
+  fromDate.setUTCDate(fromDate.getUTCDate() - 14);
   const fromIso = fromDate.toISOString().slice(0, 10);
 
   // Fetch all feeds in parallel
