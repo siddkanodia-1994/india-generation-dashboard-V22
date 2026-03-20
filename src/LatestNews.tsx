@@ -9,7 +9,7 @@ type NewsItem = {
   snippet: string;
 };
 
-const CACHE_KEY = "latestNews_cache_v6"; // bumped to clear stale caches
+const CACHE_KEY = "latestNews_cache_v7"; // bumped to clear stale caches
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 const MIN_DATE = "2015-01-01";
 
@@ -130,13 +130,18 @@ async function fetchGoogleNewsRSS(forceFresh: boolean): Promise<NewsItem[]> {
       const pubDate = item.querySelector("pubDate")?.textContent?.trim() || "";
       const source = item.querySelector("source")?.textContent?.trim() || "Google News";
 
-      const desc = (item.querySelector("description")?.textContent || "").replace(
-        /<[^>]+>/g,
-        ""
-      );
+      const rawDesc = item.querySelector("description")?.textContent || "";
+      const tempDiv = document.createElement("div");
+      tempDiv.innerHTML = rawDesc;
+      const desc = (tempDiv.textContent || "").replace(/\s+/g, " ").trim();
 
       const publishedAtISO = pubDate ? new Date(pubDate).toISOString() : "";
       if (!title || !link || !publishedAtISO) return null;
+
+      // Suppress snippet if it just repeats the title (Google News provides no real content)
+      const normTitle = title.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 40);
+      const normDesc = desc.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const snippet = normTitle.length > 10 && normDesc.includes(normTitle) ? "" : clamp(desc, 200);
 
       return {
         id: `${publishedAtISO}_${i}`,
@@ -144,7 +149,7 @@ async function fetchGoogleNewsRSS(forceFresh: boolean): Promise<NewsItem[]> {
         url: link,
         source,
         publishedAtISO,
-        snippet: clamp(desc, 200),
+        snippet,
       } as NewsItem;
     })
     .filter(Boolean) as NewsItem[];

@@ -71,10 +71,11 @@ function decodeEntities(s: string): string {
     .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)));
 }
 
-/** Strip HTML tags then decode entities */
+/** Decode entities first, then strip HTML tags */
 function cleanText(raw: string): string {
-  const noTags = raw.replace(/<[^>]+>/g, " ");
-  return decodeEntities(noTags).replace(/\s+/g, " ").trim();
+  const decoded = decodeEntities(raw);
+  const noTags = decoded.replace(/<[^>]+>/g, " ");
+  return noTags.replace(/\s+/g, " ").trim();
 }
 
 /** Return true if the snippet is just a repeat of the title (Google News pattern) */

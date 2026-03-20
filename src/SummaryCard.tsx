@@ -267,7 +267,7 @@ type NewsItem = { title: string; url: string; source: string; publishedAtISO: st
 const NEWS_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
 
 async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
-  const cacheKey = `pwr_news_v6_${toIso}`;
+  const cacheKey = `pwr_news_v7_${toIso}`;
   try {
     const cached = localStorage.getItem(cacheKey);
     if (cached) {
