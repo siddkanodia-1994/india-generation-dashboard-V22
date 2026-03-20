@@ -158,14 +158,48 @@ function parseItems(xml: string, fromIso: string, isPriority: boolean): Item[] {
   return items;
 }
 
-/** Deduplicate by title, keep newest first; priority items sort before GN items */
+const TOPIC_TIERS: Array<{ terms: string[]; score: number }> = [
+  {
+    score: 30, // Tier 1: demand & coal
+    terms: [
+      "peak demand", "power demand", "grid stress", "power shortage",
+      "coal stock", "coal inventory", "pithead", "cil ", "coal india", "coal availability",
+    ],
+  },
+  {
+    score: 20, // Tier 2: tariffs & prices
+    terms: [
+      "tariff", "rtm price", "dam price", "iex", "power price",
+      "electricity price", "power purchase", "power cost",
+    ],
+  },
+  {
+    score: 10, // Tier 3: renewables & storage
+    terms: [
+      "solar", "wind energy", "bess", "battery storage",
+      "renewable", "green energy", "energy storage",
+    ],
+  },
+];
+
+function topicScore(title: string, summary: string): number {
+  const hay = `${title} ${summary}`.toLowerCase();
+  let score = 0;
+  for (const tier of TOPIC_TIERS) {
+    if (tier.terms.some((t) => hay.includes(t))) score += tier.score;
+  }
+  return score;
+}
+
+/** Deduplicate by title; sort by combined topic + feed-priority score, then date */
 function dedup(items: Item[]): Item[] {
   const seen = new Set<string>();
   return items
     .sort((a, b) => {
-      // Priority feeds first, then by date descending
-      if (a.isPriority !== b.isPriority) return a.isPriority ? -1 : 1;
-      return a.publishedAtISO < b.publishedAtISO ? 1 : -1;
+      const scoreA = topicScore(a.title, a.summary) + (a.isPriority ? 15 : 0);
+      const scoreB = topicScore(b.title, b.summary) + (b.isPriority ? 15 : 0);
+      if (scoreA !== scoreB) return scoreB - scoreA;
+      return a.publishedAtISO < b.publishedAtISO ? 1 : -1; // tie-break: newest first
     })
     .filter((item) => {
       const key = item.title.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 60);
@@ -176,9 +210,9 @@ function dedup(items: Item[]): Item[] {
 }
 
 export default async function handler(): Promise<Response> {
-  // Date range: last 10 days
+  // Date range: last 30 days
   const fromDate = new Date();
-  fromDate.setUTCDate(fromDate.getUTCDate() - 10);
+  fromDate.setUTCDate(fromDate.getUTCDate() - 30);
   const fromIso = fromDate.toISOString().slice(0, 10);
 
   // Fetch all feeds in parallel

@@ -267,7 +267,7 @@ type NewsItem = { title: string; url: string; source: string; publishedAtISO: st
 const NEWS_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
 
 async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
-  const cacheKey = `pwr_news_v4_${toIso}`;
+  const cacheKey = `pwr_news_v5_${toIso}`;
   try {
     const cached = localStorage.getItem(cacheKey);
     if (cached) {
@@ -844,7 +844,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
         <div className={showNews ? "" : "no-print"}>
           <div className="flex items-center justify-between gap-3 bg-blue-50 border-l-4 border-blue-400 px-3 py-1.5">
             <div className="text-sm font-semibold text-blue-800">
-              Other key developments in the Indian power sector — Last 10 days as on {formatDisplayDate(selectedDate)}
+              Other key developments in the Indian power sector — Last 30 days as on {formatDisplayDate(selectedDate)}
             </div>
             <button
               onClick={() => setShowNews((v: boolean) => !v)}
