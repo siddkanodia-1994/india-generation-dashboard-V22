@@ -280,23 +280,14 @@ async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
   fromDate.setUTCDate(fromDate.getUTCDate() - 10);
   const fromIso = fromDate.toISOString().slice(0, 10);
 
-  const query = encodeURIComponent("India power electricity demand coal solar wind RTM");
-  const rssUrl = `https://news.google.com/rss/search?q=${query}&hl=en-IN&gl=IN&ceid=IN:en&cb=${Date.now()}`;
-  const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(rssUrl)}`;
+  // Use the Vercel Edge Function (server-side, no CORS proxy needed)
+  const res = await fetch(`/api/news?cb=${Date.now()}`);
+  if (!res.ok) throw new Error("News API failed");
+  const text = await res.text();
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 12000); // 12s timeout
-  let text: string;
-  try {
-    const res = await fetch(proxyUrl, { signal: controller.signal });
-    if (!res.ok) throw new Error("RSS fetch failed");
-    text = await res.text();
-  } finally {
-    clearTimeout(timer);
-  }
   const parser = new DOMParser();
   const doc = parser.parseFromString(text, "application/xml");
-  const powerTerms = ["power", "electricity", "energy", "coal", "solar", "wind", "rtm", "dam", "grid", "demand", "supply", "generation", "thermal", "renewable"];
+  const powerTerms = ["power", "electricity", "energy", "coal", "solar", "wind", "rtm", "dam", "grid", "demand", "supply", "generation", "thermal", "renewable", "discom", "ntpc", "iex", "tariff", "capacity", "plf"];
   const allItems: NewsItem[] = [];
 
   for (const item of Array.from(doc.querySelectorAll("item"))) {
@@ -310,17 +301,21 @@ async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
     if (isNaN(pubDate.getTime())) continue;
     const pubIso = pubDate.toISOString().slice(0, 10);
     if (pubIso < fromIso) continue;
-    // Filter on title + snippet + source combined (wider net)
     const hay = `${title} ${snippet} ${source}`.toLowerCase();
-    if (!hay.includes("india") && !hay.includes("indian")) continue;
+    // Reject clearly non-India content; India-specific sources don't always self-reference "india"
+    const isNonIndia = /\b(china|pakistan|usa|europe|africa|australia|germany|france)\b/.test(hay) &&
+      !hay.includes("india") && !hay.includes("indian");
+    if (isNonIndia) continue;
     if (!powerTerms.some((t) => hay.includes(t))) continue;
     allItems.push({ title, url: link, source, publishedAtISO: pubDate.toISOString(), snippet });
   }
 
   const items = allItems.slice(0, 8);
-  try {
-    localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), items }));
-  } catch { /* ignore */ }
+  if (items.length > 0) {
+    try {
+      localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), items }));
+    } catch { /* ignore */ }
+  }
 
   return items;
 }
