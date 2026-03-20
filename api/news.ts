@@ -18,13 +18,15 @@ const GN = (q: string) =>
   "&hl=en-IN&gl=IN&ceid=IN:en";
 
 const FEEDS = [
-  // Google News queries — India-targeted
+  // Google News queries — India-targeted (broad)
   GN("India power electricity sector coal discom grid demand generation"),
   GN("India solar wind renewable energy NTPC IEX RTM DAM tariff capacity"),
   GN("India peak demand power shortage thermal hydro PLF generation"),
+  // Google News queries — targeted (surfaces ET Energy & high-quality power articles)
+  GN("India peak power demand summer GW CEA ministry coal availability"),
+  GN("India electricity tariff RTM DAM IEX power purchase coal stock"),
 
-  // Indian energy publications (always India-specific — no need for "india" in title)
-  "https://economictimes.indiatimes.com/industry/energy/rss",
+  // Indian energy publications with working RSS
   "https://mercomindia.com/feed/",
   "https://www.business-standard.com/rss/power-sector-12.rss",
   "https://powerline.net.in/feed/",

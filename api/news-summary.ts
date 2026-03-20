@@ -20,19 +20,21 @@ const GN = (q: string) =>
   encodeURIComponent(q) +
   "&hl=en-IN&gl=IN&ceid=IN:en";
 
-// Priority feeds — these include real article descriptions
+// Priority feeds — working RSS with real article descriptions
 const PRIORITY_FEEDS = [
-  "https://economictimes.indiatimes.com/industry/energy/rss",
+  // ET Energy RSS (energy.economictimes.indiatimes.com) returns 0 items — excluded
   "https://mercomindia.com/feed/",
   "https://www.business-standard.com/rss/power-sector-12.rss",
   "https://powerline.net.in/feed/",
 ];
 
-// Google News feeds — descriptions are just the title repeated
+// Google News feeds — broad + targeted queries to surface ET Energy & high-signal articles
 const GN_FEEDS = [
   GN("India power electricity sector coal discom grid demand generation"),
   GN("India solar wind renewable energy NTPC IEX RTM DAM tariff capacity"),
   GN("India peak demand power shortage thermal hydro PLF generation"),
+  GN("India peak power demand summer GW CEA ministry coal availability"),
+  GN("India electricity tariff RTM DAM IEX power purchase coal stock"),
 ];
 
 const FETCH_HEADERS = {
