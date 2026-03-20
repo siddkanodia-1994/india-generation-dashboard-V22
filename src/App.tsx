@@ -68,6 +68,8 @@ export default function App() {
                     suffix: " MU",
                     decimals: 2,
                   }}
+                  extraBadgeCols={[]}
+                  showYoyBadge={true}
                 />
               </TabPanel>
 
@@ -86,6 +88,8 @@ export default function App() {
                     suffix: " MU",
                     decimals: 2,
                   }}
+                  extraBadgeCols={[]}
+                  showYoyBadge={true}
                 />
               </TabPanel>
 
@@ -104,6 +108,8 @@ export default function App() {
                     suffix: " MU",
                     decimals: 2,
                   }}
+                  extraBadgeCols={[]}
+                  showYoyBadge={true}
                 />
               </TabPanel>
             </Tabs>
