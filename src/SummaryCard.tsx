@@ -267,7 +267,7 @@ type NewsItem = { title: string; url: string; source: string; publishedAtISO: st
 const NEWS_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 hours
 
 async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
-  const cacheKey = `pwr_news_v2_${toIso}`;
+  const cacheKey = `pwr_news_v3_${toIso}`;
   try {
     const cached = localStorage.getItem(cacheKey);
     if (cached) {
@@ -296,7 +296,7 @@ async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
     const pubDateStr = item.querySelector("pubDate")?.textContent?.trim() ?? "";
     const source = item.querySelector("source")?.textContent?.trim() ?? "";
     const rawDesc = item.querySelector("description")?.textContent ?? "";
-    const snippet = rawDesc.replace(/<[^>]+>/g, "").trim().slice(0, 200);
+    const snippet = rawDesc.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim().slice(0, 400);
     const pubDate = new Date(pubDateStr);
     if (isNaN(pubDate.getTime())) continue;
     const pubIso = pubDate.toISOString().slice(0, 10);
@@ -310,7 +310,7 @@ async function fetchPowerNews(toIso: string): Promise<NewsItem[]> {
     allItems.push({ title, url: link, source, publishedAtISO: pubDate.toISOString(), snippet });
   }
 
-  const items = allItems.slice(0, 8);
+  const items = allItems.slice(0, 5);
   if (items.length > 0) {
     try {
       localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), items }));
@@ -330,6 +330,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
   const [loading, setLoading] = useState(true);
   const [newsItems, setNewsItems] = useState<NewsItem[]>([]);
   const [newsLoading, setNewsLoading] = useState(false);
+  const [showNews, setShowNews] = useState(true);
 
   useEffect(() => {
     Promise.all([fetch(rtmCsvUrl).then((r) => r.text()), fetch(supplyCsvUrl).then((r) => r.text())])
@@ -864,23 +865,35 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
 
         {/* ── Key Power Updates ── */}
         <div>
-          <div className="bg-blue-50 border-l-4 border-blue-400 px-3 py-1.5 text-sm font-semibold text-blue-800">
-            Other key developments in the Indian power sector — Last 10 days as on {formatDisplayDate(selectedDate)}
+          <div className="flex items-center justify-between gap-3 bg-blue-50 border-l-4 border-blue-400 px-3 py-1.5">
+            <div className="text-sm font-semibold text-blue-800">
+              Other key developments in the Indian power sector — Last 10 days as on {formatDisplayDate(selectedDate)}
+            </div>
+            <button
+              onClick={() => setShowNews((v: boolean) => !v)}
+              className={`shrink-0 text-xs px-3 py-1 rounded-full font-medium border transition-colors no-print ${
+                showNews
+                  ? "bg-white text-blue-700 border-blue-200 hover:bg-blue-50"
+                  : "bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200"
+              }`}
+            >
+              {showNews ? "Hide from export" : "Show in export"}
+            </button>
           </div>
-          <div className="mt-2 space-y-2">
-            {newsLoading && (
-              <p className="text-sm text-slate-500 px-1">Loading news…</p>
-            )}
-            {!newsLoading && newsItems.length === 0 && (
-              <p className="text-sm text-slate-500 px-1">No recent news found for this date range.</p>
-            )}
-            {!newsLoading && newsItems.map((item, i) => {
-              const pubDate = new Date(item.publishedAtISO);
-              const dateStr = `${ordinal(pubDate.getUTCDate())} ${MONTH_NAMES[pubDate.getUTCMonth()]} ${pubDate.getUTCFullYear()}`;
-              return (
-                <div key={i} className="flex gap-2 text-sm">
-                  <span className="text-slate-400 font-semibold shrink-0">{i + 1}.</span>
-                  <span>
+          {showNews && (
+            <div className="mt-2 space-y-3">
+              {newsLoading && (
+                <p className="text-sm text-slate-500 px-1">Loading news…</p>
+              )}
+              {!newsLoading && newsItems.length === 0 && (
+                <p className="text-sm text-slate-500 px-1">No recent news found for this date range.</p>
+              )}
+              {!newsLoading && newsItems.map((item, i) => {
+                const pubDate = new Date(item.publishedAtISO);
+                const dateStr = `${ordinal(pubDate.getUTCDate())} ${MONTH_NAMES[pubDate.getUTCMonth()]} ${pubDate.getUTCFullYear()}`;
+                return (
+                  <div key={i} className="flex gap-2 text-sm">
+                    <span className="text-slate-400 font-semibold shrink-0">{i + 1}.</span>
                     <div>
                       <a
                         href={item.url}
@@ -892,14 +905,14 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
                       </a>
                       <span className="text-xs text-slate-500 ml-1">— {item.source} · {dateStr}</span>
                       {item.snippet && (
-                        <p className="text-xs text-slate-500 mt-0.5 leading-snug">{item.snippet}</p>
+                        <p className="text-sm text-slate-600 mt-1 leading-relaxed">{item.snippet}</p>
                       )}
                     </div>
-                  </span>
-                </div>
-              );
-            })}
-          </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
     </>
