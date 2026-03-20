@@ -1,3 +1,61 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* ── react-tabs: professional underline style ─────────────────── */
+.react-tabs__tab-list {
+  border-bottom: 2px solid #e2e8f0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.react-tabs__tab {
+  display: inline-block;
+  position: relative;
+  bottom: -2px;
+  padding: 10px 16px;
+  border: none;
+  border-bottom: 3px solid transparent;
+  background: transparent;
+  border-radius: 0;
+  cursor: pointer;
+  color: #64748b;
+  font-size: 0.875rem;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: color 0.15s ease, background-color 0.15s ease;
+  list-style: none;
+}
+
+.react-tabs__tab:hover:not(.react-tabs__tab--selected) {
+  color: #1e293b;
+  background-color: #f8fafc;
+}
+
+.react-tabs__tab--selected {
+  color: #1e293b;
+  font-weight: 600;
+  border-bottom: 3px solid #4f46e5;
+  background: transparent;
+}
+
+.react-tabs__tab:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+.react-tabs__tab:focus-visible {
+  outline: 2px solid #4f46e5;
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+
+.react-tabs__tab-panel {
+  display: none;
+}
+
+.react-tabs__tab-panel--selected {
+  display: block;
+}

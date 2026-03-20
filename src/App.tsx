@@ -1,6 +1,5 @@
 import React from "react";
 import { Tabs, TabList, Tab, TabPanel } from "react-tabs";
-import "react-tabs/style/react-tabs.css";
 
 import ElectricityDashboard from "./ElectricityDashboard";
 import RTMVsStocksDailyCard from "./RTMVsStocksDailyCard";
