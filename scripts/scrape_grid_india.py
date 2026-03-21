@@ -128,22 +128,23 @@ _GRID_API_FILE_URL = "https://webapi.grid-india.in/api/v1/file"
 _GRID_CDN_BASE     = "https://webcdn.grid-india.in"
 
 
-_VERCEL_PROXY_URL = "https://india-generation-dashboard-v22.vercel.app/api/grid-india-url"
+_SUPABASE_PROXY_URL = "https://jqxsgnvdnfyyeenqyqzs.supabase.co/functions/v1/grid-india-url"
 
 
-def _find_excel_url_via_vercel(target_date: date):
+def _find_excel_url_via_proxy(target_date: date):
     """
-    Fallback: call the Vercel proxy endpoint which forwards the Grid India API
-    request from Vercel's edge network (not blocked like GitHub Actions IPs).
+    Fallback: call the Supabase Edge Function proxy which forwards the Grid India
+    API request from Supabase's infrastructure (not blocked like GitHub Actions IPs).
+    The function uses the GoDaddy CA cert to handle Grid India's cert chain.
     """
     fy          = _fy_label(target_date)
     month       = target_date.strftime("%m")
     date_prefix = target_date.strftime("%d.%m.%y")
 
-    print(f"[GRID] Trying Vercel proxy for {target_date}...")
+    print(f"[GRID] Trying Supabase proxy for {target_date}...")
     try:
         resp = requests.get(
-            _VERCEL_PROXY_URL,
+            _SUPABASE_PROXY_URL,
             params={"fy": fy, "month": month, "date": date_prefix},
             timeout=30,
         )
@@ -151,12 +152,12 @@ def _find_excel_url_via_vercel(target_date: date):
         data = resp.json()
         url = data.get("url")
         if url:
-            print(f"[GRID] Vercel proxy found XLS URL: {url}")
+            print(f"[GRID] Supabase proxy found XLS URL: {url}")
             return url
         err = data.get("error", "no url returned")
-        print(f"[GRID] Vercel proxy: {err}")
+        print(f"[GRID] Supabase proxy: {err}")
     except Exception as e:
-        print(f"[GRID] Vercel proxy failed: {e}")
+        print(f"[GRID] Supabase proxy failed: {e}")
 
     return None
 
@@ -192,7 +193,7 @@ def _find_excel_url(target_date: date):
 
     if items is None:
         # API unreachable — try Vercel proxy fallback
-        return _find_excel_url_via_vercel(target_date)
+        return _find_excel_url_via_proxy(target_date)
 
     for item in items:
         fp = item.get("FilePath", "")
@@ -203,7 +204,7 @@ def _find_excel_url(target_date: date):
 
     print(f"[GRID] No XLS found for {date_prefix} in API response ({len(items)} files).")
     # API returned results but no match for this date — try Vercel proxy fallback
-    return _find_excel_url_via_vercel(target_date)
+    return _find_excel_url_via_proxy(target_date)
 
 
 def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
