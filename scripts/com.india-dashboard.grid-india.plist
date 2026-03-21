@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.india-dashboard.grid-india</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/siddhantkanodia/Documents/Claude Working Folder/Power Daily Data/india-generation-dashboard-V21/scripts/run_local.sh</string>
+  </array>
+
+  <!-- Runs at 9:00, 9:30, 10:00, 10:30, 11:00am IST (Mac must be set to IST) -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer></dict>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>/Users/siddhantkanodia/Documents/Claude Working Folder/Power Daily Data/india-generation-dashboard-V21/scripts/run_local.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/siddhantkanodia/Documents/Claude Working Folder/Power Daily Data/india-generation-dashboard-V21/scripts/run_local.log</string>
+
+  <!-- Do not run immediately on load -->
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
