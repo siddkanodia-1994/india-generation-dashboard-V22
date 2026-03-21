@@ -121,16 +121,61 @@ def _api_post(url, json, headers, timeout=30):
 
 # Grid India exposes an undocumented REST API at webapi.grid-india.in that returns
 # file listings. The CDN (webcdn.grid-india.in) serves files directly without any
-# browser or IP restrictions — no Playwright needed.
+# browser or IP restrictions. If the API is blocked (e.g. GitHub Actions IPs),
+# _find_excel_url_via_playwright() is used as a fallback.
 
 _GRID_API_FILE_URL = "https://webapi.grid-india.in/api/v1/file"
 _GRID_CDN_BASE     = "https://webcdn.grid-india.in"
 
 
+def _find_excel_url_via_playwright(target_date: date):
+    """
+    Fallback: use Playwright (real Chrome) to scrape the Grid India reports page
+    and extract the XLS download URL for target_date.
+    Used when the REST API is unreachable (IP block on GitHub Actions).
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("[GRID] Playwright not installed — cannot use browser fallback.")
+        return None
+
+    date_prefix = target_date.strftime("%d.%m.%y")  # e.g. "20.03.26"
+    reports_url = "https://grid-india.in/en/reports/daily-psp-report"
+
+    print(f"[GRID] API unreachable — falling back to Playwright for {target_date}...")
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(reports_url, timeout=60000, wait_until="networkidle")
+
+            # Try exact selector: anchor with href containing date_prefix and ending in .xls
+            links = page.locator(f"a[href*='{date_prefix}'][href$='.xls']").all()
+            if not links:
+                # Broader: any anchor whose href contains the date prefix
+                links = page.locator(f"a[href*='{date_prefix}']").all()
+
+            for link in links:
+                href = link.get_attribute("href") or ""
+                if ".xls" in href:
+                    url = href if href.startswith("http") else f"{_GRID_CDN_BASE}/{href.lstrip('/')}"
+                    print(f"[GRID] Playwright found XLS URL: {url}")
+                    browser.close()
+                    return url
+
+            browser.close()
+            print(f"[GRID] Playwright: no XLS link found for {date_prefix} on reports page.")
+    except Exception as e:
+        print(f"[GRID] Playwright fallback failed: {e}")
+
+    return None
+
+
 def _find_excel_url(target_date: date):
     """
     Use Grid India REST API to find the XLS download URL for target_date.
-    No browser required — works from any IP including GitHub Actions.
+    Falls back to Playwright if the API is unreachable (e.g. IP block on GitHub Actions).
     """
     fy           = _fy_label(target_date)           # e.g. "2025-26"
     month        = target_date.strftime("%m")        # e.g. "03"
@@ -155,8 +200,10 @@ def _find_excel_url(target_date: date):
             if attempt < 3:
                 import time as _time
                 _time.sleep(5 * attempt)  # 5s, 10s back-off
+
     if items is None:
-        return None
+        # API unreachable — try Playwright fallback
+        return _find_excel_url_via_playwright(target_date)
 
     for item in items:
         fp = item.get("FilePath", "")
@@ -166,7 +213,8 @@ def _find_excel_url(target_date: date):
             return url
 
     print(f"[GRID] No XLS found for {date_prefix} in API response ({len(items)} files).")
-    return None
+    # API returned results but no match for this date — try Playwright fallback
+    return _find_excel_url_via_playwright(target_date)
 
 
 def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
