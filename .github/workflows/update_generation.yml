@@ -64,6 +64,17 @@ jobs:
             git push
           fi
 
-      - name: PDF not yet available (will retry at next cron)
+      - name: PDF not yet available — retry or notify
         if: steps.scrape.outputs.exit_code == '2'
-        run: echo "PSP PDF not yet published. Next cron run will retry."
+        run: |
+          HOUR=$(date -u +%H)
+          MIN=$(date -u +%M)
+          TOTAL_MIN=$((HOUR * 60 + MIN))
+          # Last cron fires at 5:30am UTC (11:00am IST). Any run at/after 5:15am UTC
+          # is the final attempt — fail the workflow so GitHub sends an email notification.
+          if [ "$TOTAL_MIN" -ge 315 ]; then
+            echo "::error::Grid India PSP data still missing after all retries (final window: 11:00am IST). Manual check required."
+            exit 1
+          else
+            echo "PSP PDF not yet published. Next cron run will retry."
+          fi
