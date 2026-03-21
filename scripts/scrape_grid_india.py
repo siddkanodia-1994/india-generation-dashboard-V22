@@ -128,46 +128,35 @@ _GRID_API_FILE_URL = "https://webapi.grid-india.in/api/v1/file"
 _GRID_CDN_BASE     = "https://webcdn.grid-india.in"
 
 
-def _find_excel_url_via_playwright(target_date: date):
+_VERCEL_PROXY_URL = "https://india-generation-dashboard-v22.vercel.app/api/grid-india-url"
+
+
+def _find_excel_url_via_vercel(target_date: date):
     """
-    Fallback: use Playwright (real Chrome) to scrape the Grid India reports page
-    and extract the XLS download URL for target_date.
-    Used when the REST API is unreachable (IP block on GitHub Actions).
+    Fallback: call the Vercel proxy endpoint which forwards the Grid India API
+    request from Vercel's edge network (not blocked like GitHub Actions IPs).
     """
+    fy          = _fy_label(target_date)
+    month       = target_date.strftime("%m")
+    date_prefix = target_date.strftime("%d.%m.%y")
+
+    print(f"[GRID] Trying Vercel proxy for {target_date}...")
     try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        print("[GRID] Playwright not installed — cannot use browser fallback.")
-        return None
-
-    date_prefix = target_date.strftime("%d.%m.%y")  # e.g. "20.03.26"
-    reports_url = "https://grid-india.in/en/reports/daily-psp-report"
-
-    print(f"[GRID] API unreachable — falling back to Playwright for {target_date}...")
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page()
-            page.goto(reports_url, timeout=60000, wait_until="networkidle")
-
-            # Try exact selector: anchor with href containing date_prefix and ending in .xls
-            links = page.locator(f"a[href*='{date_prefix}'][href$='.xls']").all()
-            if not links:
-                # Broader: any anchor whose href contains the date prefix
-                links = page.locator(f"a[href*='{date_prefix}']").all()
-
-            for link in links:
-                href = link.get_attribute("href") or ""
-                if ".xls" in href:
-                    url = href if href.startswith("http") else f"{_GRID_CDN_BASE}/{href.lstrip('/')}"
-                    print(f"[GRID] Playwright found XLS URL: {url}")
-                    browser.close()
-                    return url
-
-            browser.close()
-            print(f"[GRID] Playwright: no XLS link found for {date_prefix} on reports page.")
+        resp = requests.get(
+            _VERCEL_PROXY_URL,
+            params={"fy": fy, "month": month, "date": date_prefix},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        url = data.get("url")
+        if url:
+            print(f"[GRID] Vercel proxy found XLS URL: {url}")
+            return url
+        err = data.get("error", "no url returned")
+        print(f"[GRID] Vercel proxy: {err}")
     except Exception as e:
-        print(f"[GRID] Playwright fallback failed: {e}")
+        print(f"[GRID] Vercel proxy failed: {e}")
 
     return None
 
@@ -202,8 +191,8 @@ def _find_excel_url(target_date: date):
                 _time.sleep(5 * attempt)  # 5s, 10s back-off
 
     if items is None:
-        # API unreachable — try Playwright fallback
-        return _find_excel_url_via_playwright(target_date)
+        # API unreachable — try Vercel proxy fallback
+        return _find_excel_url_via_vercel(target_date)
 
     for item in items:
         fp = item.get("FilePath", "")
@@ -213,8 +202,8 @@ def _find_excel_url(target_date: date):
             return url
 
     print(f"[GRID] No XLS found for {date_prefix} in API response ({len(items)} files).")
-    # API returned results but no match for this date — try Playwright fallback
-    return _find_excel_url_via_playwright(target_date)
+    # API returned results but no match for this date — try Vercel proxy fallback
+    return _find_excel_url_via_vercel(target_date)
 
 
 def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
