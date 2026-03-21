@@ -5,7 +5,6 @@ import ElectricityDashboard from "./ElectricityDashboard";
 import RTMVsStocksDailyCard from "./RTMVsStocksDailyCard";
 import RatedCapacity from "./RatedCapacity";
 import LatestNews from "./LatestNews";
-import LatestReports from "./LatestReports";
 import SummaryCard from "./SummaryCard";
 
 export default function App() {
@@ -25,7 +24,6 @@ export default function App() {
               <Tab>DAM Prices</Tab>
               <Tab>Rated Capacity</Tab>
               <Tab>Latest News</Tab>
-              <Tab>Latest Reports</Tab>
             </TabList>
           </div>
 
@@ -368,12 +366,6 @@ export default function App() {
             <LatestNews />
           </TabPanel>
 
-          {/* ===========================
-              Latest Reports
-              =========================== */}
-          <TabPanel>
-            <LatestReports />
-          </TabPanel>
         </Tabs>
       </div>
     </div>
