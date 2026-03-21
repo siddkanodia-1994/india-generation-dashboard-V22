@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 interface SummaryCardProps {
   rtmCsvUrl: string;
@@ -309,6 +309,17 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
   const [newsLoading, setNewsLoading] = useState(false);
   const [showNews, setShowNews] = useState(true);
 
+  // ── Editable overrides (shared via Supabase) ─────────────────────────────────
+  const [commentaryEditing, setCommentaryEditing] = useState(false);
+  const [commentaryOverride, setCommentaryOverride] = useState("");
+  // Stable ref: seed captured once on Edit click — prevents React overwriting
+  // contenteditable DOM during re-renders (e.g. newsItems state updates)
+  const commentaryEditSeed = useRef<string>("");
+
+  const [newsEditing, setNewsEditing] = useState(false);
+  const [newsOverride, setNewsOverride] = useState("");
+  const [newsEditText, setNewsEditText] = useState("");
+
   useEffect(() => {
     Promise.all([fetch(rtmCsvUrl).then((r) => r.text()), fetch(supplyCsvUrl).then((r) => r.text())])
       .then(([rtmText, supplyText]) => {
@@ -336,6 +347,33 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
       .catch(() => setNewsItems([]))
       .finally(() => setNewsLoading(false));
   }, [selectedDate]);
+
+  // ── Fetch shared overrides from Supabase (via edge fn) ───────────────────────
+  useEffect(() => {
+    const CACHE_KEY = "overrides_cache_v1";
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        if (typeof obj.ts === "number" && Date.now() - obj.ts < 15 * 60 * 1000) {
+          setCommentaryOverride(obj.data?.commentary ?? "");
+          setNewsOverride(obj.data?.news_section ?? "");
+          return;
+        }
+      }
+    } catch { /* ignore */ }
+
+    fetch("/api/overrides")
+      .then((r) => r.json())
+      .then((data: Record<string, string>) => {
+        setCommentaryOverride(data.commentary ?? "");
+        setNewsOverride(data.news_section ?? "");
+        try {
+          localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), data }));
+        } catch { /* ignore */ }
+      })
+      .catch(() => { /* silently fall through to default */ });
+  }, []);
 
   // ── Compute all metrics ──────────────────────────────────────────────────────
   const metrics = useMemo(() => {
@@ -585,6 +623,53 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
     pdf.save(fname);
   }
 
+  // ── Override helpers ─────────────────────────────────────────────────────────
+  function saveOverride(key: "commentary" | "news_section", value: string) {
+    fetch("/api/overrides", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key, value }),
+    }).catch(() => { /* best-effort */ });
+    try { localStorage.removeItem("overrides_cache_v1"); } catch { /* ignore */ }
+  }
+
+  /** Build the Market Commentary as an HTML string — same output as the JSX,
+   *  used to seed the contenteditable div on first Edit click. */
+  function buildCommentaryHTML(): string {
+    if (!metrics) return "";
+    const { rtm, sup, wdName, ytdYoy, fyLabel, avg30WoW, avg7WoW, prev7DateLabel } = metrics;
+    const colorClass = (n: number | null) =>
+      n == null || !Number.isFinite(n) ? "color:#94a3b8" : n >= 0 ? "color:#059669;font-weight:600" : "color:#ef4444;font-weight:600";
+
+    return [
+      `<p class="text-xs font-semibold text-slate-400 uppercase tracking-wide" style="font-size:0.75rem;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em">RTM Price Summary</p>`,
+      `<p style="font-size:0.875rem;color:#1e293b;line-height:1.625">` +
+        `The 30-day rolling RTM price <strong style="font-weight:600;color:#0f172a">${direction(avg30WoW)}</strong> to ` +
+        `<strong style="font-weight:600;color:#0f172a">₹${fmtPrice(rtm.avg30)}/kWh</strong> as of ${wdName} ${formatDisplayDate(selectedDate)}, from ` +
+        `<strong style="font-weight:600;color:#0f172a">₹${fmtPrice(rtm.prev30)}/kWh</strong> on ${prev7DateLabel} — ` +
+        `<span style="${colorClass(avg30WoW)}">${fmtPct(avg30WoW)} WoW</span>.` +
+      `</p>`,
+      `<p style="font-size:0.875rem;color:#1e293b;line-height:1.625">` +
+        `The 7-day average RTM price <strong style="font-weight:600;color:#0f172a">${direction(avg7WoW)}</strong> to ` +
+        `<strong style="font-weight:600;color:#0f172a">₹${fmtPrice(rtm.avg7)}/kWh</strong>, compared to ` +
+        `<strong style="font-weight:600;color:#0f172a">₹${fmtPrice(rtm.prevAvg7)}/kWh</strong> last week ` +
+        `(<span style="${colorClass(avg7WoW)}">${fmtPct(avg7WoW)}</span>).` +
+      `</p>`,
+      `<p class="text-xs font-semibold text-slate-400 uppercase tracking-wide mt-1" style="font-size:0.75rem;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:0.05em;margin-top:0.25rem">Demand Summary</p>`,
+      `<p style="font-size:0.875rem;color:#1e293b;line-height:1.625">` +
+        `The rolling 30-day average power demand <strong style="font-weight:600;color:#0f172a">${upDown(sup.avg30Yoy, sup.prev30Yoy)}</strong> to ` +
+        `<span style="${colorClass(sup.avg30Yoy)}">${fmtPct(sup.avg30Yoy)} YoY</span>, ` +
+        `${sup.avg30Yoy != null && sup.prev30Yoy != null ? (sup.avg30Yoy > sup.prev30Yoy ? "up" : "down") : ""} from ` +
+        `<span style="${colorClass(sup.prev30Yoy)}">${fmtPct(sup.prev30Yoy)} YoY</span> a week ago.` +
+      `</p>`,
+      `<p style="font-size:0.875rem;color:#1e293b;line-height:1.625">` +
+        `As of ${formatDisplayDate(selectedDate)}, Year-to-Date (${fyLabel}) power demand growth stands at ` +
+        `<span style="${colorClass(ytdYoy)}"><strong style="font-weight:600">${fmtPct(ytdYoy)} YoY</strong></span>. ` +
+        `The 7-day average demand growth is <span style="${colorClass(sup.avg7Yoy)}">${fmtPct(sup.avg7Yoy)} YoY</span>.` +
+      `</p>`,
+    ].join("");
+  }
+
   // ── Render helpers ───────────────────────────────────────────────────────────
   function Spacer({ cols }: { cols: number }) {
     return (
@@ -799,45 +884,105 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
 
         {/* ── Market Commentary ── */}
         <div className="border border-slate-200 rounded-lg p-4 bg-slate-50 space-y-3">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Market Commentary</div>
+          {/* Header row with edit controls */}
+          <div className="flex items-center justify-between">
+            <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Market Commentary</div>
+            <div className="flex items-center gap-2 no-print">
+              {commentaryOverride && !commentaryEditing && (
+                <>
+                  <span className="text-xs text-amber-600 font-medium">Edited ●</span>
+                  <button
+                    onClick={() => {
+                      if (window.confirm("Reset to auto-generated commentary?")) {
+                        setCommentaryOverride("");
+                        saveOverride("commentary", "");
+                      }
+                    }}
+                    className="text-xs px-2 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-600"
+                  >
+                    ↺ Reset
+                  </button>
+                </>
+              )}
+              {!commentaryEditing ? (
+                <button
+                  onClick={() => {
+                    commentaryEditSeed.current = commentaryOverride || buildCommentaryHTML();
+                    setCommentaryEditing(true);
+                  }}
+                  className="text-xs px-2 py-1 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-600"
+                >
+                  ✏ Edit
+                </button>
+              ) : (
+                <button
+                  onClick={() => setCommentaryEditing(false)}
+                  className="text-xs px-2 py-1 rounded-lg bg-blue-600 text-white hover:bg-blue-700"
+                >
+                  ✓ Done
+                </button>
+              )}
+            </div>
+          </div>
 
-          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">RTM Price Summary</p>
-          <p className="text-sm text-slate-800 leading-relaxed">
-            The 30-day rolling RTM price{" "}
-            <strong className="font-semibold text-slate-900">{direction(avg30WoW)}</strong>{" "}
-            to{" "}
-            <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.avg30)}/kWh</strong>{" "}
-            as of {wdName} {formatDisplayDate(selectedDate)}, from{" "}
-            <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.prev30)}/kWh</strong>{" "}
-            on {prev7DateLabel} —{" "}
-            <span className={pctClass(avg30WoW)}>{fmtPct(avg30WoW)} WoW</span>.
-          </p>
-          <p className="text-sm text-slate-800 leading-relaxed">
-            The 7-day average RTM price{" "}
-            <strong className="font-semibold text-slate-900">{direction(avg7WoW)}</strong>{" "}
-            to{" "}
-            <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.avg7)}/kWh</strong>,
-            compared to{" "}
-            <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.prevAvg7)}/kWh</strong>{" "}
-            last week (<span className={pctClass(avg7WoW)}>{fmtPct(avg7WoW)}</span>).
-          </p>
-
-          <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mt-1">Demand Summary</p>
-          <p className="text-sm text-slate-800 leading-relaxed">
-            The rolling 30-day average power demand{" "}
-            <strong className="font-semibold text-slate-900">{upDown(sup.avg30Yoy, sup.prev30Yoy)}</strong>{" "}
-            to{" "}
-            <span className={pctClass(sup.avg30Yoy)}>{fmtPct(sup.avg30Yoy)} YoY</span>,{" "}
-            {sup.avg30Yoy != null && sup.prev30Yoy != null ? (sup.avg30Yoy > sup.prev30Yoy ? "up" : "down") : ""}{" "}
-            from{" "}
-            <span className={pctClass(sup.prev30Yoy)}>{fmtPct(sup.prev30Yoy)} YoY</span> a week ago.
-          </p>
-          <p className="text-sm text-slate-800 leading-relaxed">
-            As of {formatDisplayDate(selectedDate)}, Year-to-Date ({fyLabel}) power demand growth stands at{" "}
-            <span className={pctClass(ytdYoy)}><strong className="font-semibold">{fmtPct(ytdYoy)} YoY</strong></span>.{" "}
-            The 7-day average demand growth is{" "}
-            <span className={pctClass(sup.avg7Yoy)}>{fmtPct(sup.avg7Yoy)} YoY</span>.
-          </p>
+          {/* Content — edit / override / default */}
+          {commentaryEditing ? (
+            <div
+              contentEditable
+              suppressContentEditableWarning
+              onBlur={(e) => {
+                const html = e.currentTarget.innerHTML;
+                setCommentaryOverride(html);
+                saveOverride("commentary", html);
+              }}
+              dangerouslySetInnerHTML={{ __html: commentaryEditSeed.current }}
+              className="text-sm text-slate-800 leading-relaxed space-y-2 min-h-[6rem] outline-none border border-blue-300 rounded-lg p-3 focus:ring-2 focus:ring-blue-300 bg-white"
+            />
+          ) : commentaryOverride ? (
+            <div
+              dangerouslySetInnerHTML={{ __html: commentaryOverride }}
+              className="space-y-2"
+            />
+          ) : (
+            <>
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">RTM Price Summary</p>
+              <p className="text-sm text-slate-800 leading-relaxed">
+                The 30-day rolling RTM price{" "}
+                <strong className="font-semibold text-slate-900">{direction(avg30WoW)}</strong>{" "}
+                to{" "}
+                <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.avg30)}/kWh</strong>{" "}
+                as of {wdName} {formatDisplayDate(selectedDate)}, from{" "}
+                <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.prev30)}/kWh</strong>{" "}
+                on {prev7DateLabel} —{" "}
+                <span className={pctClass(avg30WoW)}>{fmtPct(avg30WoW)} WoW</span>.
+              </p>
+              <p className="text-sm text-slate-800 leading-relaxed">
+                The 7-day average RTM price{" "}
+                <strong className="font-semibold text-slate-900">{direction(avg7WoW)}</strong>{" "}
+                to{" "}
+                <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.avg7)}/kWh</strong>,
+                compared to{" "}
+                <strong className="font-semibold text-slate-900">₹{fmtPrice(rtm.prevAvg7)}/kWh</strong>{" "}
+                last week (<span className={pctClass(avg7WoW)}>{fmtPct(avg7WoW)}</span>).
+              </p>
+              <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mt-1">Demand Summary</p>
+              <p className="text-sm text-slate-800 leading-relaxed">
+                The rolling 30-day average power demand{" "}
+                <strong className="font-semibold text-slate-900">{upDown(sup.avg30Yoy, sup.prev30Yoy)}</strong>{" "}
+                to{" "}
+                <span className={pctClass(sup.avg30Yoy)}>{fmtPct(sup.avg30Yoy)} YoY</span>,{" "}
+                {sup.avg30Yoy != null && sup.prev30Yoy != null ? (sup.avg30Yoy > sup.prev30Yoy ? "up" : "down") : ""}{" "}
+                from{" "}
+                <span className={pctClass(sup.prev30Yoy)}>{fmtPct(sup.prev30Yoy)} YoY</span> a week ago.
+              </p>
+              <p className="text-sm text-slate-800 leading-relaxed">
+                As of {formatDisplayDate(selectedDate)}, Year-to-Date ({fyLabel}) power demand growth stands at{" "}
+                <span className={pctClass(ytdYoy)}><strong className="font-semibold">{fmtPct(ytdYoy)} YoY</strong></span>.{" "}
+                The 7-day average demand growth is{" "}
+                <span className={pctClass(sup.avg7Yoy)}>{fmtPct(sup.avg7Yoy)} YoY</span>.
+              </p>
+            </>
+          )}
         </div>
 
         {/* ── Key Power Updates ── */}
@@ -846,48 +991,120 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
             <div className="text-sm font-semibold text-blue-800">
               Other key developments in the Indian power sector — Last 14 days as on {formatDisplayDate(selectedDate)}
             </div>
-            <button
-              onClick={() => setShowNews((v: boolean) => !v)}
-              className={`shrink-0 text-xs px-3 py-1 rounded-full font-medium border transition-colors no-print ${
-                showNews
-                  ? "bg-white text-blue-700 border-blue-200 hover:bg-blue-50"
-                  : "bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200"
-              }`}
-            >
-              {showNews ? "Hide from export" : "Show in export"}
-            </button>
+            <div className="flex items-center gap-2 no-print">
+              {/* Edit / Done toggle */}
+              {!newsEditing ? (
+                <button
+                  onClick={() => {
+                    const seed = newsOverride ||
+                      newsItems.map((item, i) => `${i + 1}. ${item.title} — ${item.source}`).join("\n");
+                    setNewsEditText(seed);
+                    setNewsEditing(true);
+                  }}
+                  className="text-xs px-2 py-1 rounded-full font-medium border bg-white text-blue-700 border-blue-200 hover:bg-blue-50"
+                >
+                  ✏ Edit
+                </button>
+              ) : (
+                <button
+                  onClick={() => setNewsEditing(false)}
+                  className="text-xs px-2 py-1 rounded-full font-medium border bg-blue-600 text-white border-blue-600 hover:bg-blue-700"
+                >
+                  ✓ Done
+                </button>
+              )}
+              {/* Reset to auto */}
+              {newsOverride && !newsEditing && (
+                <>
+                  <span className="text-xs text-amber-600 font-medium">Edited ●</span>
+                  <button
+                    onClick={() => {
+                      if (window.confirm("Reset to auto-fetched news?")) {
+                        setNewsOverride("");
+                        saveOverride("news_section", "");
+                      }
+                    }}
+                    className="text-xs px-2 py-1 rounded-full font-medium border bg-white text-blue-700 border-blue-200 hover:bg-blue-50"
+                  >
+                    ↺ Reset
+                  </button>
+                </>
+              )}
+              {/* Hide / Show in export */}
+              <button
+                onClick={() => setShowNews((v: boolean) => !v)}
+                className={`text-xs px-3 py-1 rounded-full font-medium border transition-colors ${
+                  showNews
+                    ? "bg-white text-blue-700 border-blue-200 hover:bg-blue-50"
+                    : "bg-slate-100 text-slate-500 border-slate-200 hover:bg-slate-200"
+                }`}
+              >
+                {showNews ? "Hide from export" : "Show in export"}
+              </button>
+            </div>
           </div>
+
           {showNews && (
             <div className="mt-2 space-y-3">
-              {newsLoading && (
-                <p className="text-sm text-slate-500 px-1">Loading news…</p>
+              {/* Edit mode — textarea */}
+              {newsEditing && (
+                <textarea
+                  value={newsEditText}
+                  onChange={(e) => setNewsEditText(e.target.value)}
+                  onBlur={() => {
+                    const val = newsEditText.trim();
+                    setNewsOverride(val);
+                    saveOverride("news_section", val);
+                  }}
+                  rows={8}
+                  className="w-full text-sm text-slate-800 border border-blue-300 rounded-lg p-3 resize-none focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white leading-relaxed"
+                  placeholder="Enter each news item on a new line…"
+                />
               )}
-              {!newsLoading && newsItems.length === 0 && (
-                <p className="text-sm text-slate-500 px-1">No recent news found for this date range.</p>
+
+              {/* Override display */}
+              {!newsEditing && newsOverride && (
+                <div className="space-y-2">
+                  {newsOverride.split("\n").filter(Boolean).map((line, i) => (
+                    <p key={i} className="text-sm text-slate-800 leading-relaxed">{line}</p>
+                  ))}
+                </div>
               )}
-              {!newsLoading && newsItems.map((item, i) => {
-                const pubDate = new Date(item.publishedAtISO);
-                const dateStr = `${ordinal(pubDate.getUTCDate())} ${MONTH_NAMES[pubDate.getUTCMonth()]} ${pubDate.getUTCFullYear()}`;
-                return (
-                  <div key={i} className="flex gap-2 text-sm">
-                    <span className="text-slate-400 font-semibold shrink-0">{i + 1}.</span>
-                    <div>
-                      <a
-                        href={item.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-slate-800 hover:text-blue-700 hover:underline font-medium"
-                      >
-                        {item.title}
-                      </a>
-                      <span className="text-xs text-slate-500 ml-1">— {item.source} · {dateStr}</span>
-                      {item.snippet && (
-                        <p className="text-sm text-slate-600 mt-1 leading-relaxed">{item.snippet}</p>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+
+              {/* Auto-fetched display */}
+              {!newsEditing && !newsOverride && (
+                <>
+                  {newsLoading && (
+                    <p className="text-sm text-slate-500 px-1">Loading news…</p>
+                  )}
+                  {!newsLoading && newsItems.length === 0 && (
+                    <p className="text-sm text-slate-500 px-1">No recent news found for this date range.</p>
+                  )}
+                  {!newsLoading && newsItems.map((item, i) => {
+                    const pubDate = new Date(item.publishedAtISO);
+                    const dateStr = `${ordinal(pubDate.getUTCDate())} ${MONTH_NAMES[pubDate.getUTCMonth()]} ${pubDate.getUTCFullYear()}`;
+                    return (
+                      <div key={i} className="flex gap-2 text-sm">
+                        <span className="text-slate-400 font-semibold shrink-0">{i + 1}.</span>
+                        <div>
+                          <a
+                            href={item.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-slate-800 hover:text-blue-700 hover:underline font-medium"
+                          >
+                            {item.title}
+                          </a>
+                          <span className="text-xs text-slate-500 ml-1">— {item.source} · {dateStr}</span>
+                          {item.snippet && (
+                            <p className="text-sm text-slate-600 mt-1 leading-relaxed">{item.snippet}</p>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </>
+              )}
             </div>
           )}
         </div>
