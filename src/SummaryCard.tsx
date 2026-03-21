@@ -738,7 +738,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
         {/* ── RTM Price Update ── */}
         <div>
           <div className="bg-lime-300 font-bold text-sm px-3 py-1.5 rounded-t">RTM Price Update</div>
-          <table className="w-full border-collapse bg-white text-sm rounded-b overflow-hidden shadow-sm">
+          <table className="w-auto border-collapse bg-white text-sm rounded-b overflow-hidden shadow-sm">
             <thead>
               <tr className="bg-gray-900 text-white">
                 <th className="px-3 py-2 text-left font-semibold">Metric</th>
@@ -817,7 +817,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
         {/* ── Power Demand Update ── */}
         <div>
           <div className="bg-lime-300 font-bold text-sm px-3 py-1.5 rounded-t">Power Demand Update</div>
-          <table className="w-full border-collapse bg-white text-sm rounded-b overflow-hidden shadow-sm">
+          <table className="w-auto border-collapse bg-white text-sm rounded-b overflow-hidden shadow-sm">
             <thead>
               <tr className="bg-gray-900 text-white">
                 <th className="px-3 py-2 text-left font-semibold">Metric</th>
