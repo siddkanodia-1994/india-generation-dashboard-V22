@@ -229,72 +229,71 @@ def scrape_coal_plf(target_date: date | None = None) -> bool:
 CAPACITY_SOURCES = ["Coal", "Oil & Gas", "Nuclear", "Hydro", "Solar", "Wind", "Small-Hydro", "Bio Power"]
 
 
+_CAPACITY_PARAM_OBJ = [{
+    "name": "Capacity", "id": "capacity",
+    "filterType": "parameter", "valueSuffix": "MW", "graphType": "bar",
+    "selected": True, "sources": True, "sourceLimit": 10,
+    "filterBy": True, "compareBy": True, "rangeBy": True, "dualAxis": True, "chartAxis": "first",
+}]
+
+_CAPACITY_SOURCE_MAP = {
+    "coal":       "Coal",
+    "oil-gas":    "Oil & Gas",
+    "nuclear":    "Nuclear",
+    "hydro":      "Hydro",
+    "solar":      "Solar",
+    "wind":       "Wind",
+    "small-hydro": "Small-Hydro",
+    "bio-power":  "Bio Power",
+}
+
+
 def _scrape_capacity(target_month_date: date) -> dict | None:
     """
-    Scrape monthly installed capacity (GW) by source from ICED NITI.
+    Fetch monthly installed capacity (GW) by source from ICED NITI performanceFilter API.
     target_month_date is the 1st of the target month.
     Returns dict of {source: gw_value} or None.
     """
-    api_candidates = [
-        f"{ICED_NITI_URL}api/capacity",
-        f"{ICED_NITI_URL}api/power/capacity",
-        f"{ICED_NITI_URL}api/installed-capacity",
-        f"{ICED_NITI_URL}data/capacity.json",
-    ]
-    month_str = target_month_date.strftime("%m/%Y")
-    for api_url in api_candidates:
-        try:
-            r = SESSION.get(api_url, params={"month": month_str}, timeout=15)
-            if r.status_code == 200:
-                data = r.json()
-                if isinstance(data, dict):
-                    cap = {}
-                    key_map = {
-                        "coal":       "Coal",
-                        "oil":        "Oil & Gas",
-                        "gas":        "Oil & Gas",
-                        "nuclear":    "Nuclear",
-                        "hydro":      "Hydro",
-                        "solar":      "Solar",
-                        "wind":       "Wind",
-                        "smallhydro": "Small-Hydro",
-                        "bio":        "Bio Power",
-                    }
-                    for k, v in data.items():
-                        for fragment, mapped in key_map.items():
-                            if fragment in k.lower():
-                                cap[mapped] = round(float(v), 0)
-                    if cap:
-                        return cap
-        except Exception:
-            continue
-
-    # Fallback: scrape page
-    soup = _get_soup(ICED_NITI_URL)
-    if soup is None:
+    # Fetch a 6-month window ending at the target month
+    start = (target_month_date.replace(day=1) - timedelta(days=150)).replace(day=1)
+    end = target_month_date.replace(day=1)
+    body = {
+        "parameter": ["capacity"],
+        "paramObj": _CAPACITY_PARAM_OBJ,
+        "dualObj": [],
+        "dual": False,
+        "source": [],
+        "compare": [],
+        "filter": [],
+        "analyticsType": "",
+        "startDate": start.strftime("%Y-%m-%d"),
+        "endDate": end.strftime("%Y-%m-%d"),
+        "rangeType": "month",
+    }
+    try:
+        resp = SESSION.post(_ICED_API_URL, json=body, headers=_ICED_HEADERS, timeout=30)
+        resp.raise_for_status()
+        data = _decrypt_iced(resp.text)
+    except Exception as e:
+        print(f"[NITI-CAP] API error: {e}")
         return None
 
-    # Attempt to find a data table
-    tables = soup.find_all("table")
-    for table in tables:
-        text = table.get_text(" ", strip=True).lower()
-        if "coal" in text and ("solar" in text or "wind" in text):
-            cap = {}
-            rows = table.find_all("tr")
-            for row in rows:
-                cells = [td.get_text(strip=True) for td in row.find_all(["td", "th"])]
-                if len(cells) >= 2:
-                    label = cells[0].lower()
-                    for source in CAPACITY_SOURCES:
-                        if source.lower() in label:
-                            try:
-                                cap[source] = round(float(re.sub(r"[^\d.]", "", cells[1])), 0)
-                            except Exception:
-                                pass
-            if cap:
-                return cap
+    rows = data[0].get("data", []) if data else []
+    target_key = target_month_date.strftime("%Y-%m")
+    cap = {}
+    for r in rows:
+        if r["_id"].get("year") == target_key:
+            src = r["_id"].get("source", "")
+            mapped = _CAPACITY_SOURCE_MAP.get(src)
+            if mapped:
+                cap[mapped] = round(r["total"] / 1000, 0)  # MW → GW
 
-    return None
+    if not cap:
+        print(f"[NITI-CAP] No data found for {target_key} in API response (months available: "
+              f"{sorted(set(r['_id'].get('year','') for r in rows))})")
+        return None
+
+    return cap
 
 
 def scrape_capacity(target_month: date | None = None) -> bool:
@@ -320,17 +319,21 @@ def scrape_capacity(target_month: date | None = None) -> bool:
 
     # Build row matching capacity.csv column order:
     # Capacity (GW), Coal, Oil & Gas, Nuclear, Hydro, Solar, Wind, Small-Hydro, Bio Power
+    def _gw(src):
+        v = cap.get(src)
+        return int(v) if v is not None else ""
+
     date_str = target_month.strftime("01/%m/%Y")
     row = [
         date_str,
-        cap.get("Coal", ""),
-        cap.get("Oil & Gas", ""),
-        cap.get("Nuclear", ""),
-        cap.get("Hydro", ""),
-        cap.get("Solar", ""),
-        cap.get("Wind", ""),
-        cap.get("Small-Hydro", ""),
-        cap.get("Bio Power", ""),
+        _gw("Coal"),
+        _gw("Oil & Gas"),
+        _gw("Nuclear"),
+        _gw("Hydro"),
+        _gw("Solar"),
+        _gw("Wind"),
+        _gw("Small-Hydro"),
+        _gw("Bio Power"),
     ]
     print(f"[NITI-CAP] Writing: {row}")
     with open(csv_path, "a", newline="") as f:
@@ -345,10 +348,27 @@ def scrape_capacity(target_month: date | None = None) -> bool:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Scrape ICED NITI data")
     parser.add_argument("--mode", choices=["coal_plf", "capacity"], required=True)
+    parser.add_argument("--backfill", action="store_true",
+                        help="Backfill capacity: fill all missing months up to current month")
     args = parser.parse_args()
 
     if args.mode == "coal_plf":
         success = scrape_coal_plf()
+    elif args.backfill:
+        # Backfill: iterate from first missing month up to current month
+        csv_path = CSV_PATHS["capacity"]
+        last = _last_date_in_csv(csv_path)
+        today = date.today()
+        current_month = today.replace(day=1)
+        start_month = (last.replace(day=1) + timedelta(days=32)).replace(day=1) if last else current_month
+        success = True
+        m = start_month
+        while m <= current_month:
+            ok = scrape_capacity(m)
+            if not ok:
+                print(f"[NITI-CAP] Backfill: no data yet for {m.strftime('%B %Y')} — stopping.")
+                break
+            m = (m + timedelta(days=32)).replace(day=1)
     else:
         success = scrape_capacity()
 

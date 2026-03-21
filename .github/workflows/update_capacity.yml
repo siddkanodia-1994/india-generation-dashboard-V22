@@ -34,9 +34,6 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r scripts/requirements.txt
 
-      - name: Install Playwright browsers (Chromium only)
-        run: playwright install chromium --with-deps
-
       - name: Run capacity scraper (ICED NITI)
         run: |
           cd scripts

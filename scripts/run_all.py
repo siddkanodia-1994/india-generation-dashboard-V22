@@ -66,8 +66,26 @@ def mode_generation() -> bool:
 
 def mode_capacity() -> bool:
     from scrape_iced_niti import scrape_capacity
+    from config import CSV_PATHS
+    from scrape_iced_niti import _last_date_in_csv
+    from datetime import date, timedelta
 
-    return run("Installed Capacity (ICED NITI)", scrape_capacity)
+    csv_path = CSV_PATHS["capacity"]
+    last = _last_date_in_csv(csv_path)
+    today = date.today()
+    current_month = today.replace(day=1)
+    start_month = (last.replace(day=1) + timedelta(days=32)).replace(day=1) if last else current_month
+
+    # Backfill any missing months up to current month
+    success = True
+    m = start_month
+    while m <= current_month:
+        ok = run(f"Installed Capacity (ICED NITI) {m.strftime('%B %Y')}", lambda mo=m: scrape_capacity(mo))
+        if not ok:
+            print(f"[NITI-CAP] No data for {m.strftime('%B %Y')} yet — skipping remaining months.")
+            break
+        m = (m + timedelta(days=32)).replace(day=1)
+    return success
 
 
 def mode_all() -> bool:
