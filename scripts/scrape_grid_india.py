@@ -162,10 +162,54 @@ def _find_excel_url_via_proxy(target_date: date):
     return None
 
 
+def _find_excel_url_via_cdn_probe(target_date: date):
+    """
+    Last-resort fallback: probe the CDN directly with parallel HEAD requests.
+    The CDN (webcdn.grid-india.in) has no IP restrictions and is always accessible.
+    URL format: https://webcdn.grid-india.in/files/grdw/{YYYY}/{MM}/{date_prefix}_NLDC_PSP_{N}.xls
+    N is unknown but always in 1-999 range (observed: 234, 278, 632, 828).
+    With 50 concurrent workers this typically completes in under 2 seconds.
+    """
+    import concurrent.futures
+    import threading
+
+    year        = target_date.strftime("%Y")
+    month       = target_date.strftime("%m")
+    date_prefix = target_date.strftime("%d.%m.%y")
+    base        = f"{_GRID_CDN_BASE}/files/grdw/{year}/{month}/{date_prefix}_NLDC_PSP"
+
+    print(f"[GRID] Probing CDN for {date_prefix} (N=1–999, 50 workers)...")
+
+    found  = threading.Event()
+    result = [None]
+
+    def check(n):
+        if found.is_set():
+            return
+        url = f"{base}_{n}.xls"
+        try:
+            r = requests.head(url, timeout=5, allow_redirects=True)
+            if r.status_code == 200 and not found.is_set():
+                found.set()
+                result[0] = url
+        except Exception:
+            pass
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+        executor.map(check, range(1, 1000))
+
+    if result[0]:
+        print(f"[GRID] CDN probe found: {result[0]}")
+        return result[0]
+
+    print(f"[GRID] CDN probe: no file found for {date_prefix}")
+    return None
+
+
 def _find_excel_url(target_date: date):
     """
     Use Grid India REST API to find the XLS download URL for target_date.
-    Falls back to Playwright if the API is unreachable (e.g. IP block on GitHub Actions).
+    Falls back to Supabase proxy, then CDN probe if API is IP-blocked.
     """
     fy           = _fy_label(target_date)           # e.g. "2025-26"
     month        = target_date.strftime("%m")        # e.g. "03"
@@ -192,8 +236,9 @@ def _find_excel_url(target_date: date):
                 _time.sleep(5 * attempt)  # 5s, 10s back-off
 
     if items is None:
-        # API unreachable — try Vercel proxy fallback
-        return _find_excel_url_via_proxy(target_date)
+        # API unreachable — try Supabase proxy, then CDN probe
+        url = _find_excel_url_via_proxy(target_date)
+        return url if url else _find_excel_url_via_cdn_probe(target_date)
 
     for item in items:
         fp = item.get("FilePath", "")
@@ -203,8 +248,9 @@ def _find_excel_url(target_date: date):
             return url
 
     print(f"[GRID] No XLS found for {date_prefix} in API response ({len(items)} files).")
-    # API returned results but no match for this date — try Vercel proxy fallback
-    return _find_excel_url_via_proxy(target_date)
+    # API returned results but no match — try Supabase proxy, then CDN probe
+    url = _find_excel_url_via_proxy(target_date)
+    return url if url else _find_excel_url_via_cdn_probe(target_date)
 
 
 def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
