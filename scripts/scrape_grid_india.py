@@ -188,7 +188,8 @@ def _find_excel_url_via_cdn_probe(target_date: date):
             return
         url = f"{base}_{n}.xls"
         try:
-            r = requests.head(url, timeout=5, allow_redirects=True)
+            r = requests.get(url, timeout=5, allow_redirects=True, stream=True)
+            r.close()
             if r.status_code == 200 and not found.is_set():
                 found.set()
                 result[0] = url
