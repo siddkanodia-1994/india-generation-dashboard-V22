@@ -8,7 +8,7 @@ Reads STOCK_TICKERS from config.py.
 import re
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -97,12 +97,13 @@ def _scrape_screener(ticker: str):
     Scrape current price and P/B ratio for a ticker from Screener.in.
     Returns {"price": float, "pb": float} or None.
     """
-    url = SCREENER_BASE_URL.format(ticker=ticker)
+    base_url = SCREENER_BASE_URL.format(ticker=ticker)
+    consolidated_url = base_url.rstrip("/") + "/consolidated/"
     try:
-        r = SESSION.get(url, timeout=20)
+        r = SESSION.get(consolidated_url, timeout=20)
         if r.status_code == 404:
-            # Try consolidated page
-            r = SESSION.get(url.rstrip("/") + "/consolidated/", timeout=20)
+            # Fallback to standalone if no consolidated page
+            r = SESSION.get(base_url, timeout=20)
         r.raise_for_status()
     except Exception as e:
         print(f"[STOCKS] Failed to fetch {ticker}: {e}")
@@ -279,9 +280,12 @@ def _update_xlsx(results, target_date):
 
 # ── Main logic ────────────────────────────────────────────────────────────────
 
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
 def scrape_stocks(target_date=None):
     if target_date is None:
-        target_date = date.today() - timedelta(days=1)
+        target_date = datetime.now(_IST).date() - timedelta(days=1)
 
     print(f"[STOCKS] Scraping {len(STOCK_TICKERS)} tickers for {target_date}...")
 
