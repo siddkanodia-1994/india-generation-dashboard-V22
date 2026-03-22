@@ -516,7 +516,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
 
     // Group 1
     addRtmDataRow("Avg Last 30 Days", fmtPrice(rtm.avg30), null, true);
-    addRtmDataRow("Previous 30 Days Avg", fmtPrice(rtm.prev30), growthPct(rtm.avg30, rtm.prev30), false);
+    addRtmDataRow("Previous 30 Days Avg (7 days ago)", fmtPrice(rtm.prev30), growthPct(rtm.avg30, rtm.prev30), false);
     addSpacer();
     // Group 2
     addRtmDataRow("Avg Last 7 Days", fmtPrice(rtm.avg7), null, true);
@@ -563,7 +563,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
 
     // Group 1
     addSupDataRow("Avg Last 30 Days", sup.avg30Yoy, true);
-    addSupDataRow("Previous 30 Days Avg", sup.prev30Yoy, false);
+    addSupDataRow("Previous 30 Days Avg (7 days ago)", sup.prev30Yoy, false);
     addSpacer();
     // Group 2
     addSupDataRow("Avg Last 7 Days", sup.avg7Yoy, true);
@@ -754,7 +754,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
                 <td className="px-3 py-2" />
               </tr>
               <tr className="border-t border-slate-100">
-                <td className="px-3 py-2 text-slate-700">Previous 30 Days Avg</td>
+                <td className="px-3 py-2 text-slate-700">Previous 30 Days Avg (7 days ago)</td>
                 <td className="px-3 py-2 text-right tabular-nums text-slate-700">{fmtPrice(rtm.prev30)}</td>
                 <PctCell value={growthPct(rtm.avg30, rtm.prev30)} />
               </tr>
@@ -831,7 +831,7 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
                 <PctCell value={sup.avg30Yoy} />
               </tr>
               <tr className="border-t border-slate-100">
-                <td className="px-3 py-2 text-slate-700">Previous 30 Days Avg</td>
+                <td className="px-3 py-2 text-slate-700">Previous 30 Days Avg (7 days ago)</td>
                 <PctCell value={sup.prev30Yoy} />
               </tr>
 
