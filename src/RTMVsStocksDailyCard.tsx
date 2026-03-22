@@ -14,7 +14,7 @@ import {
 } from "recharts";
 
 type Mode = "price" | "ptb";
-type WindowDays = 7 | 14 | 30 | 45;
+type WindowDays = 1 | 7 | 14 | 30 | 45;
 type RangePreset = "1m" | "3m" | "6m" | "12m" | "24m" | "36m" | "ytd" | "all";
 
 /* -----------------------------
@@ -489,6 +489,7 @@ export default function RTMVsStocksDailyCard(props: {
 
   const [mode, setMode] = useState<Mode>("price");
   const [windowDays, setWindowDays] = useState<WindowDays>(45);
+  const periodLabel = windowDays === 1 ? "daily" : `${windowDays}d rolling`;
   const [showYoY, setShowYoY] = useState(false);
   const [showRtmControlLines, setShowRtmControlLines] = useState(false);
 
@@ -881,6 +882,7 @@ export default function RTMVsStocksDailyCard(props: {
                   onChange={(e) => setWindowDays(Number(e.target.value) as WindowDays)}
                   className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700"
                 >
+                  <option value={1}>Daily (No Averaging)</option>
                   <option value={7}>Last 7 Days Rolling (AVG)</option>
                   <option value={14}>Last 14 Days Rolling (AVG)</option>
                   <option value={30}>Last 30 Days Rolling (AVG)</option>
@@ -1018,8 +1020,9 @@ export default function RTMVsStocksDailyCard(props: {
               </label>
 
               <div className="text-xs text-slate-500">
-                Stocks rolling uses last {windowDays} available trading days. RTM rolling uses calendar days, lagged by{" "}
-                {lagClamped} days.
+                {windowDays === 1
+                  ? "Showing raw daily values. RTM anchors to the exact date; stocks use the nearest available trading day."
+                  : `Stocks rolling uses last ${windowDays} available trading days. RTM rolling uses calendar days, lagged by ${lagClamped} days.`}
               </div>
             </div>
 
@@ -1036,7 +1039,7 @@ export default function RTMVsStocksDailyCard(props: {
                   </div>
 
                   <div className="text-sm text-slate-700">
-                    <span className="text-slate-500">RTM (rolling):</span>{" "}
+                    <span className="text-slate-500">RTM ({periodLabel}):</span>{" "}
                     <span className="font-semibold">
                       {useLogScale ? (quickStats.rtm != null ? quickStats.rtm.toFixed(3) : "—") : fmtRtm(quickStats.rtm)}
                     </span>
@@ -1075,7 +1078,7 @@ export default function RTMVsStocksDailyCard(props: {
                   </div>
 
                   <div className="text-sm text-slate-700">
-                    <span className="text-slate-500">Stocks (rolling):</span>
+                    <span className="text-slate-500">Stocks ({periodLabel}):</span>
                     <div className="mt-1 space-y-1">
                       {selectedStocks.map((s) => (
                         <div key={s} className="flex items-center justify-between gap-2">
@@ -1271,8 +1274,8 @@ export default function RTMVsStocksDailyCard(props: {
                             return [
                               useLogScale ? `${(num ?? NaN).toFixed(3)} (log10)` : `${fmtRtm(num)} Rs/Unit`,
                               useLogScale
-                                ? `RTM (log10 rolling, lag ${lagClamped}d)`
-                                : `RTM (rolling avg, lag ${lagClamped}d)`
+                                ? `RTM (log10 ${periodLabel}, lag ${lagClamped}d)`
+                                : `RTM (${periodLabel}, lag ${lagClamped}d)`
                             ];
                           }
 
@@ -1464,7 +1467,7 @@ export default function RTMVsStocksDailyCard(props: {
                       <XAxis
                         type="number"
                         dataKey="x"
-                        name="RTM (rolling)"
+                        name={`RTM (${periodLabel})`}
                         tick={{ fontSize: 12 }}
                         tickFormatter={(v) => {
                           const n = asFiniteNumber(v);
@@ -1474,8 +1477,8 @@ export default function RTMVsStocksDailyCard(props: {
                         domain={scatterDomains.x}
                         label={{
                           value: useLogScale
-                            ? `RTM (log10 rolling)${lagClamped ? ` (lag ${lagClamped}d)` : ""}`
-                            : `RTM (rolling) ₹/unit${lagClamped ? ` (lag ${lagClamped}d)` : ""}`,
+                            ? `RTM (log10 ${periodLabel})${lagClamped ? ` (lag ${lagClamped}d)` : ""}`
+                            : `RTM (${periodLabel}) ₹/unit${lagClamped ? ` (lag ${lagClamped}d)` : ""}`,
                           position: "insideBottom",
                           offset: -10,
                           fontSize: 12
@@ -1485,7 +1488,7 @@ export default function RTMVsStocksDailyCard(props: {
                       <YAxis
                         type="number"
                         dataKey="y"
-                        name="Stock (rolling)"
+                        name={`Stock (${periodLabel})`}
                         tick={{ fontSize: 12 }}
                         tickFormatter={(v) => {
                           const n = asFiniteNumber(v);
@@ -1496,11 +1499,11 @@ export default function RTMVsStocksDailyCard(props: {
                         label={{
                           value: useLogScale
                             ? mode === "price"
-                              ? "Stock (log10 rolling) Price"
-                              : "Stock (log10 rolling) P/B"
+                              ? `Stock (log10 ${periodLabel}) Price`
+                              : `Stock (log10 ${periodLabel}) P/B`
                             : mode === "price"
-                              ? "Stock (rolling) Price"
-                              : "Stock (rolling) P/B",
+                              ? `Stock (${periodLabel}) Price`
+                              : `Stock (${periodLabel}) P/B`,
                           angle: -90,
                           position: "insideLeft",
                           fontSize: 12
@@ -1619,12 +1622,12 @@ export default function RTMVsStocksDailyCard(props: {
                   Each dot is one date in the selected range.{" "}
                   {useLogScale ? (
                     <>
-                      X = log10(RTM rolling, lagged by {lagClamped}d). Y = log10(stock rolling{" "}
+                      X = log10(RTM {periodLabel}, lagged by {lagClamped}d). Y = log10(stock {periodLabel}{" "}
                       {mode === "price" ? "Price" : "P/B"}).
                     </>
                   ) : (
                     <>
-                      X = RTM rolling (lagged by {lagClamped}d). Y = stock rolling ({mode === "price" ? "Price" : "P/B"}).
+                      X = RTM {periodLabel} (lagged by {lagClamped}d). Y = stock {periodLabel} ({mode === "price" ? "Price" : "P/B"}).
                     </>
                   )}{" "}
                   Trend lines are linear best-fit lines; legend shows R².
