@@ -1178,7 +1178,7 @@ export default function RTMVsStocksDailyCard(props: {
                 <span className="font-medium">Show regression equation</span>
               </label>
               <div className="mt-1 text-[11px] text-slate-500">
-                When enabled, tooltip shows y = mx + b and R² for the hovered stock.
+                When enabled, shows y = mx + b and R² for each stock below the chart (also in hover tooltip).
               </div>
             </div>
           </div>
@@ -1632,6 +1632,26 @@ export default function RTMVsStocksDailyCard(props: {
                   )}{" "}
                   Trend lines are linear best-fit lines; legend shows R².
                 </div>
+
+                {showScatterEqn && selectedStocks.some((s) => regressionByStock[s]) && (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {selectedStocks.map((s, i) => {
+                      const reg = regressionByStock[s];
+                      if (!reg) return null;
+                      return (
+                        <div
+                          key={s}
+                          className="rounded-lg bg-slate-50 px-3 py-1.5 text-[11px] ring-1 ring-slate-200"
+                          style={{ borderLeft: `3px solid ${getStockColor(i)}` }}
+                        >
+                          <span className="font-semibold text-slate-700">{s}</span>
+                          <span className="ml-2 font-mono text-slate-600">{fmtEqn(reg.slope, reg.intercept)}</span>
+                          <span className="ml-2 text-slate-500">R² = <span className="font-semibold">{fmtR2(reg.r2)}</span></span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </>
             )}
           </Card>
