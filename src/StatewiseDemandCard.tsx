@@ -106,22 +106,21 @@ function rollingAvg(sortedKeys: string[], rows: Map<string, Record<string, numbe
 function computeStats(
   sortedKeys: string[],
   rows: Map<string, Record<string, number>>,
-  state: string
+  state: string,
+  avgWindow: number = 30
 ) {
-  if (!sortedKeys.length) return { latest: null, avg30: null, yoy: null };
+  if (!sortedKeys.length) return { latest: null, avgN: null, yoy: null };
 
   const latest = rows.get(sortedKeys[sortedKeys.length - 1])?.[state] ?? null;
 
-  // 30-day avg
-  const last30 = sortedKeys.slice(-30);
-  const vals30 = last30.map((k) => rows.get(k)?.[state]).filter((v): v is number => v !== undefined);
-  const avg30 = vals30.length ? Math.round(vals30.reduce((a, b) => a + b, 0) / vals30.length) : null;
+  // N-day avg
+  const lastN = sortedKeys.slice(-avgWindow);
+  const valsN = lastN.map((k) => rows.get(k)?.[state]).filter((v): v is number => v !== undefined);
+  const avgN = valsN.length ? Math.round(valsN.reduce((a, b) => a + b, 0) / valsN.length) : null;
 
-  // YoY: same day last year
+  // YoY: same day last year (search within ±3 days)
   const lastKey = sortedKeys[sortedKeys.length - 1];
   const [y, m, d] = lastKey.split("-").map(Number);
-  const yoyKey = `${y - 1}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-  // Find nearest key around yoyKey (within ±3 days)
   let yoyVal: number | null = null;
   for (let delta = 0; delta <= 3; delta++) {
     for (const sign of [0, 1, -1]) {
@@ -134,7 +133,33 @@ function computeStats(
   }
   const yoy = latest !== null && yoyVal !== null ? ((latest - yoyVal) / yoyVal) * 100 : null;
 
-  return { latest, avg30, yoy };
+  return { latest, avgN, yoy };
+}
+
+function computeMarketShare(
+  sortedKeys: string[],
+  rows: Map<string, Record<string, number>>,
+  state: string,
+  allStates: string[],
+  avgWindow: number
+): number | null {
+  const windowKeys = sortedKeys.slice(-avgWindow);
+  if (!windowKeys.length) return null;
+
+  let stateSum = 0, allSum = 0, count = 0;
+  for (const k of windowKeys) {
+    const row = rows.get(k);
+    if (!row) continue;
+    const sv = row[state];
+    if (sv === undefined) continue;
+    const total = allStates.reduce((acc, s) => acc + (row[s] ?? 0), 0);
+    if (total <= 0) continue;
+    stateSum += sv;
+    allSum += total;
+    count++;
+  }
+  if (count === 0 || allSum === 0) return null;
+  return (stateSum / allSum) * 100;
 }
 
 // ── Custom Tooltip ────────────────────────────────────────────────────────────
@@ -164,6 +189,7 @@ export default function StatewiseDemandCard() {
   const [selectedStates, setSelectedStates] = useState<string[]>([]);
   const [rangeIdx, setRangeIdx] = useState(2); // default: Last 1 year
   const [showAvg, setShowAvg] = useState(false);
+  const [avgWindow, setAvgWindow] = useState<7 | 14 | 30 | 45>(30);
 
   // Load CSV
   useEffect(() => {
@@ -393,7 +419,7 @@ export default function StatewiseDemandCard() {
                   <Legend
                     wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
                     formatter={(val) =>
-                      val.endsWith("_avg") ? `${val.replace("_avg", "")} (30d avg)` : val
+                      val.endsWith("_avg") ? `${val.replace("_avg", "")} (${avgWindow}d avg)` : val
                     }
                   />
                   {selectedStates.map((s, i) => (
@@ -429,18 +455,35 @@ export default function StatewiseDemandCard() {
           {/* Summary table */}
           {selectedStates.length > 0 && (
             <div className="mt-3 overflow-x-auto rounded-2xl bg-white ring-1 ring-slate-200">
+              {/* Table toolbar: avg window selector */}
+              <div className="flex items-center justify-between px-4 py-2 border-b border-slate-100">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Summary</span>
+                <select
+                  value={avgWindow}
+                  onChange={(e) => setAvgWindow(Number(e.target.value) as 7 | 14 | 30 | 45)}
+                  className="rounded-xl border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                >
+                  <option value={7}>Last 7-day Avg</option>
+                  <option value={14}>Last 14-day Avg</option>
+                  <option value={30}>Last 30-day Avg</option>
+                  <option value={45}>Last 45-day Avg</option>
+                </select>
+              </div>
+
               <table className="w-full text-[12px]">
                 <thead>
                   <tr className="border-b border-slate-100">
                     <th className="px-4 py-2.5 text-left font-semibold text-slate-500">State</th>
                     <th className="px-4 py-2.5 text-right font-semibold text-slate-500">Latest (MU)</th>
-                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">30-day Avg (MU)</th>
+                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">{avgWindow}-day Avg (MU)</th>
                     <th className="px-4 py-2.5 text-right font-semibold text-slate-500">YoY %</th>
+                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">Market Share</th>
                   </tr>
                 </thead>
                 <tbody>
                   {selectedStates.map((s, i) => {
-                    const stats = computeStats(sortedKeys, filteredRows, s);
+                    const stats = computeStats(sortedKeys, filteredRows, s, avgWindow);
+                    const share = computeMarketShare(sortedKeys, filteredRows, s, data.states, avgWindow);
                     const yoyPositive = stats.yoy !== null && stats.yoy >= 0;
                     return (
                       <tr key={s} className="border-b border-slate-50 hover:bg-slate-50">
@@ -457,7 +500,7 @@ export default function StatewiseDemandCard() {
                           {stats.latest !== null ? stats.latest.toLocaleString() : "—"}
                         </td>
                         <td className="px-4 py-2 text-right text-slate-600">
-                          {stats.avg30 !== null ? stats.avg30.toLocaleString() : "—"}
+                          {stats.avgN !== null ? stats.avgN.toLocaleString() : "—"}
                         </td>
                         <td className={`px-4 py-2 text-right font-semibold ${
                           stats.yoy === null ? "text-slate-400" :
@@ -467,10 +510,51 @@ export default function StatewiseDemandCard() {
                             ? `${yoyPositive ? "+" : ""}${stats.yoy.toFixed(1)}%`
                             : "—"}
                         </td>
+                        <td className="px-4 py-2 text-right text-slate-500">
+                          {share !== null ? `${share.toFixed(1)}%` : "—"}
+                        </td>
                       </tr>
                     );
                   })}
                 </tbody>
+                {/* Total row */}
+                <tfoot>
+                  <tr className="border-t-2 border-slate-200 bg-slate-50">
+                    <td className="px-4 py-2.5 font-semibold text-slate-700">Total (selected)</td>
+                    <td className="px-4 py-2.5 text-right font-semibold text-slate-800">
+                      {(() => {
+                        const lastKey = sortedKeys[sortedKeys.length - 1];
+                        const lastRow = lastKey ? filteredRows.get(lastKey) : undefined;
+                        const total = selectedStates.reduce((acc, s) => acc + (lastRow?.[s] ?? 0), 0);
+                        return total > 0 ? total.toLocaleString(undefined, { maximumFractionDigits: 1 }) : "—";
+                      })()}
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-semibold text-slate-700">
+                      {(() => {
+                        const windowKeys = sortedKeys.slice(-avgWindow);
+                        if (!windowKeys.length) return "—";
+                        let sum = 0, count = 0;
+                        for (const k of windowKeys) {
+                          const row = filteredRows.get(k);
+                          if (!row) continue;
+                          const dayTotal = selectedStates.reduce((acc, s) => acc + (row[s] ?? 0), 0);
+                          if (dayTotal > 0) { sum += dayTotal; count++; }
+                        }
+                        return count > 0 ? Math.round(sum / count).toLocaleString() : "—";
+                      })()}
+                    </td>
+                    <td className="px-4 py-2.5 text-right font-semibold text-slate-500">—</td>
+                    <td className="px-4 py-2.5 text-right font-semibold text-slate-700">
+                      {(() => {
+                        const shares = selectedStates.map((s) =>
+                          computeMarketShare(sortedKeys, filteredRows, s, data.states, avgWindow)
+                        );
+                        const total = shares.reduce((acc, v) => acc + (v ?? 0), 0);
+                        return shares.some((v) => v !== null) ? `${total.toFixed(1)}%` : "—";
+                      })()}
+                    </td>
+                  </tr>
+                </tfoot>
               </table>
             </div>
           )}
