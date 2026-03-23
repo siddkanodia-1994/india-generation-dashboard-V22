@@ -34,8 +34,15 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r scripts/requirements.txt
 
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-chromium-${{ hashFiles('scripts/requirements.txt') }}
+
       - name: Install Playwright browsers (Chromium only)
-        run: playwright install chromium --with-deps
+        run: playwright install chromium
 
       - name: Run RTM live scraper (Today)
         run: |
