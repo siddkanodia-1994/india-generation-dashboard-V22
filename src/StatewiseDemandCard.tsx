@@ -248,6 +248,18 @@ export default function StatewiseDemandCard() {
   const [showAvg, setShowAvg] = useState(false);
   const [avgWindow, setAvgWindow] = useState<7 | 14 | 30 | 45>(30);
   const [showYoY, setShowYoY] = useState(false);
+  type SortKey = 'state' | 'latest' | 'shareLatest' | 'yoy' | 'avgN' | 'avgYoY' | 'share';
+  const [sortConfig, setSortConfig] = useState<{ key: SortKey; dir: 'asc' | 'desc' } | null>(null);
+  const handleSort = (key: SortKey) =>
+    setSortConfig((prev) =>
+      prev?.key === key
+        ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' }
+        : { key, dir: 'asc' }
+    );
+  const sortIcon = (key: SortKey) =>
+    sortConfig?.key === key
+      ? sortConfig.dir === 'asc' ? ' ▲' : ' ▼'
+      : ' ⇅';
 
   // Load CSV
   useEffect(() => {
@@ -577,79 +589,115 @@ export default function StatewiseDemandCard() {
                   <option value={45}>Last 45-day Avg</option>
                 </select>
               </div>
-              <table className="w-full text-[12px]">
-                <thead>
-                  <tr className="border-b border-slate-100">
-                    <th className="px-4 py-2.5 text-left font-semibold text-slate-500">State</th>
-                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">
-                      Latest (MU)
-                      {sortedKeys.length > 0 && (
-                        <span className="ml-1 font-normal text-slate-400">· {fmtXLabel(sortedKeys[sortedKeys.length - 1])}</span>
-                      )}
-                    </th>
-                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">Share (Latest)</th>
-                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">YoY% (Latest)</th>
-                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">{avgWindow}-day Avg (MU)</th>
-                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">{avgWindow}d Avg YoY%</th>
-                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">Market Share</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {selectedStates.map((s, i) => {
-                    const lastKey = sortedKeys[sortedKeys.length - 1];
-                    const stats = computeStats(sortedKeys, filteredRows, s, avgWindow);
-                    const latestShare = lastKey ? computeLatestShare(lastKey, filteredRows, s, data.states) : null;
-                    const avgYoY = computeAvgYoY(sortedKeys, filteredRows, s, avgWindow);
-                    const share = computeMarketShare(sortedKeys, filteredRows, s, data.states, avgWindow);
-                    const yoyPositive = stats.yoy !== null && stats.yoy >= 0;
-                    const avgYoYPositive = avgYoY !== null && avgYoY >= 0;
-                    return (
-                      <tr key={s} className="border-b border-slate-50 hover:bg-slate-50">
-                        <td className="px-4 py-2">
-                          <div className="flex items-center gap-2 font-medium text-slate-700">
-                            <span
-                              className="inline-block h-2.5 w-2.5 rounded-full flex-shrink-0"
-                              style={{ backgroundColor: getStateColor(i) }}
-                            />
-                            {s}
-                          </div>
-                        </td>
-                        <td className="px-4 py-2 text-right font-semibold text-slate-800">
-                          {stats.latest !== null ? stats.latest.toLocaleString() : "—"}
-                        </td>
-                        <td className="px-4 py-2 text-right text-slate-500">
-                          {latestShare !== null ? `${latestShare.toFixed(1)}%` : "—"}
-                        </td>
-                        <td className={`px-4 py-2 text-right font-semibold ${
-                          stats.yoy === null ? "text-slate-400" :
-                          yoyPositive ? "text-emerald-600" : "text-red-600"
-                        }`}>
-                          {stats.yoy !== null
-                            ? `${yoyPositive ? "+" : ""}${stats.yoy.toFixed(1)}%`
-                            : "—"}
-                        </td>
-                        <td className="px-4 py-2 text-right text-slate-600">
-                          {stats.avgN !== null ? stats.avgN.toLocaleString() : "—"}
-                        </td>
-                        <td className={`px-4 py-2 text-right font-semibold ${
-                          avgYoY === null ? "text-slate-400" :
-                          avgYoYPositive ? "text-emerald-600" : "text-red-600"
-                        }`}>
-                          {avgYoY !== null
-                            ? `${avgYoYPositive ? "+" : ""}${avgYoY.toFixed(1)}%`
-                            : "—"}
-                        </td>
-                        <td className="px-4 py-2 text-right text-slate-500">
-                          {share !== null ? `${share.toFixed(1)}%` : "—"}
-                        </td>
+              {(() => {
+                // Pre-compute all row data so we can sort
+                const lastKey = sortedKeys[sortedKeys.length - 1];
+                const rawRows = selectedStates.map((s, originalIdx) => {
+                  const stats = computeStats(sortedKeys, filteredRows, s, avgWindow);
+                  const latestShare = lastKey ? computeLatestShare(lastKey, filteredRows, s, data.states) : null;
+                  const avgYoY = computeAvgYoY(sortedKeys, filteredRows, s, avgWindow);
+                  const share = computeMarketShare(sortedKeys, filteredRows, s, data.states, avgWindow);
+                  return { s, originalIdx, stats, latestShare, avgYoY, share };
+                });
+                const tableRows = sortConfig
+                  ? [...rawRows].sort((a, b) => {
+                      let av: number | string | null, bv: number | string | null;
+                      switch (sortConfig.key) {
+                        case 'state':       av = a.s;             bv = b.s;             break;
+                        case 'latest':      av = a.stats.latest;  bv = b.stats.latest;  break;
+                        case 'shareLatest': av = a.latestShare;   bv = b.latestShare;   break;
+                        case 'yoy':         av = a.stats.yoy;     bv = b.stats.yoy;     break;
+                        case 'avgN':        av = a.stats.avgN;    bv = b.stats.avgN;    break;
+                        case 'avgYoY':      av = a.avgYoY;        bv = b.avgYoY;        break;
+                        case 'share':       av = a.share;         bv = b.share;         break;
+                        default: return 0;
+                      }
+                      if (av === null) return 1;
+                      if (bv === null) return -1;
+                      if (typeof av === 'string') return sortConfig.dir === 'asc' ? av.localeCompare(bv as string) : (bv as string).localeCompare(av);
+                      return sortConfig.dir === 'asc' ? (av as number) - (bv as number) : (bv as number) - (av as number);
+                    })
+                  : rawRows;
+
+                const thClass = "px-4 py-2.5 text-right font-semibold text-slate-500 cursor-pointer select-none hover:text-slate-700 whitespace-nowrap";
+                return (
+                  <table className="w-full text-[12px]">
+                    <thead>
+                      <tr className="border-b border-slate-100">
+                        <th onClick={() => handleSort('state')} className="px-4 py-2.5 text-left font-semibold text-slate-500 cursor-pointer select-none hover:text-slate-700 whitespace-nowrap">
+                          State<span className="text-slate-300">{sortIcon('state')}</span>
+                        </th>
+                        <th onClick={() => handleSort('latest')} className={thClass}>
+                          Latest (MU)
+                          {sortedKeys.length > 0 && (
+                            <span className="ml-1 font-normal text-slate-400">· {fmtXLabel(sortedKeys[sortedKeys.length - 1])}</span>
+                          )}
+                          <span className="text-slate-300">{sortIcon('latest')}</span>
+                        </th>
+                        <th onClick={() => handleSort('shareLatest')} className={thClass}>
+                          Share (Latest)<span className="text-slate-300">{sortIcon('shareLatest')}</span>
+                        </th>
+                        <th onClick={() => handleSort('yoy')} className={thClass}>
+                          YoY% (Latest)<span className="text-slate-300">{sortIcon('yoy')}</span>
+                        </th>
+                        <th onClick={() => handleSort('avgN')} className={thClass}>
+                          {avgWindow}-day Avg (MU)<span className="text-slate-300">{sortIcon('avgN')}</span>
+                        </th>
+                        <th onClick={() => handleSort('avgYoY')} className={thClass}>
+                          {avgWindow}d Avg YoY%<span className="text-slate-300">{sortIcon('avgYoY')}</span>
+                        </th>
+                        <th onClick={() => handleSort('share')} className={thClass}>
+                          Market Share<span className="text-slate-300">{sortIcon('share')}</span>
+                        </th>
                       </tr>
-                    );
-                  })}
-                </tbody>
-                {/* Total row */}
-                <tfoot>
-                  <tr className="border-t-2 border-slate-200 bg-slate-50">
-                    <td className="px-4 py-2.5 font-semibold text-slate-700">Total (selected)</td>
+                    </thead>
+                    <tbody>
+                      {tableRows.map(({ s, originalIdx, stats, latestShare, avgYoY, share }) => {
+                        const yoyPositive = stats.yoy !== null && stats.yoy >= 0;
+                        const avgYoYPositive = avgYoY !== null && avgYoY >= 0;
+                        return (
+                          <tr key={s} className="border-b border-slate-50 hover:bg-slate-50">
+                            <td className="px-4 py-2">
+                              <div className="flex items-center gap-2 font-medium text-slate-700">
+                                <span
+                                  className="inline-block h-2.5 w-2.5 rounded-full flex-shrink-0"
+                                  style={{ backgroundColor: getStateColor(originalIdx) }}
+                                />
+                                {s}
+                              </div>
+                            </td>
+                            <td className="px-4 py-2 text-right font-semibold text-slate-800">
+                              {stats.latest !== null ? stats.latest.toLocaleString() : "—"}
+                            </td>
+                            <td className="px-4 py-2 text-right text-slate-500">
+                              {latestShare !== null ? `${latestShare.toFixed(1)}%` : "—"}
+                            </td>
+                            <td className={`px-4 py-2 text-right font-semibold ${
+                              stats.yoy === null ? "text-slate-400" :
+                              yoyPositive ? "text-emerald-600" : "text-red-600"
+                            }`}>
+                              {stats.yoy !== null ? `${yoyPositive ? "+" : ""}${stats.yoy.toFixed(1)}%` : "—"}
+                            </td>
+                            <td className="px-4 py-2 text-right text-slate-600">
+                              {stats.avgN !== null ? stats.avgN.toLocaleString() : "—"}
+                            </td>
+                            <td className={`px-4 py-2 text-right font-semibold ${
+                              avgYoY === null ? "text-slate-400" :
+                              avgYoYPositive ? "text-emerald-600" : "text-red-600"
+                            }`}>
+                              {avgYoY !== null ? `${avgYoYPositive ? "+" : ""}${avgYoY.toFixed(1)}%` : "—"}
+                            </td>
+                            <td className="px-4 py-2 text-right text-slate-500">
+                              {share !== null ? `${share.toFixed(1)}%` : "—"}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                    {/* Total row */}
+                    <tfoot>
+                      <tr className="border-t-2 border-slate-200 bg-slate-50">
+                        <td className="px-4 py-2.5 font-semibold text-slate-700">Total (selected)</td>
                     {/* Latest total */}
                     <td className="px-4 py-2.5 text-right font-semibold text-slate-800">
                       {(() => {
@@ -767,8 +815,10 @@ export default function StatewiseDemandCard() {
                       })()}
                     </td>
                   </tr>
-                </tfoot>
-              </table>
+                    </tfoot>
+                  </table>
+                );
+              })()}
             </div>
           )}
         </div>
