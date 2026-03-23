@@ -164,11 +164,12 @@ def _find_excel_url_via_proxy(target_date: date):
 
 def _find_excel_url_via_cdn_probe(target_date: date):
     """
-    Last-resort fallback: probe the CDN directly with parallel HEAD requests.
+    Last-resort fallback: probe the CDN directly with parallel GET requests.
     The CDN (webcdn.grid-india.in) has no IP restrictions and is always accessible.
-    URL format: https://webcdn.grid-india.in/files/grdw/{YYYY}/{MM}/{date_prefix}_NLDC_PSP_{N}.xls
+    URL format: https://webcdn.grid-india.in/files/grdw/{YYYY}/{MM}/{date_prefix}_NLDC_PSP_{N}.xls[x]
     N is unknown but always in 1-999 range (observed: 234, 278, 632, 828).
-    With 50 concurrent workers this typically completes in under 2 seconds.
+    Both .xls and .xlsx extensions are tried (Grid India uses both).
+    With 50 concurrent workers this typically completes in under 5 seconds.
     """
     import concurrent.futures
     import threading
@@ -178,7 +179,7 @@ def _find_excel_url_via_cdn_probe(target_date: date):
     date_prefix = target_date.strftime("%d.%m.%y")
     base        = f"{_GRID_CDN_BASE}/files/grdw/{year}/{month}/{date_prefix}_NLDC_PSP"
 
-    print(f"[GRID] Probing CDN for {date_prefix} (N=1–999, 50 workers)...")
+    print(f"[GRID] Probing CDN for {date_prefix} (N=1–999, .xls/.xlsx, 50 workers)...")
 
     found  = threading.Event()
     result = [None]
@@ -186,15 +187,19 @@ def _find_excel_url_via_cdn_probe(target_date: date):
     def check(n):
         if found.is_set():
             return
-        url = f"{base}_{n}.xls"
-        try:
-            r = requests.get(url, timeout=5, allow_redirects=True, stream=True)
-            r.close()
-            if r.status_code == 200 and not found.is_set():
-                found.set()
-                result[0] = url
-        except Exception:
-            pass
+        for ext in (".xlsx", ".xls"):          # try .xlsx first (newer files)
+            if found.is_set():
+                return
+            url = f"{base}_{n}{ext}"
+            try:
+                r = requests.get(url, timeout=5, allow_redirects=True, stream=True)
+                r.close()
+                if r.status_code == 200 and not found.is_set():
+                    found.set()
+                    result[0] = url
+                    return
+            except Exception:
+                pass
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
         executor.map(check, range(1, 1000))
