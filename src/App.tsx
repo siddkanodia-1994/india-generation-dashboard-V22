@@ -204,7 +204,7 @@ export default function App() {
               <div className="mt-2">
                 <TabList>
                   <Tab>Total Supply</Tab>
-                  <Tab>Statewise Demand</Tab>
+                  <Tab>Statewise Supply</Tab>
                 </TabList>
               </div>
 

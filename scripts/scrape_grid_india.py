@@ -559,15 +559,15 @@ _SUBTOTAL_KEYWORDS = ("region", "total", "all india", "northern", "western",
                       "southern", "eastern", "north eastern", "islands")
 
 
-def _extract_statewise(ws: "_SheetAdapter") -> dict:
+def _extract_statewise(ws: "_SheetAdapter"):
     """
     Read rows 21–59 from MOP_E sheet:
       Column B (index 2) = state name
-      Column C (index 3) = Power Supply in MU
+      Column E (index 5) = Energy Met (MU)
 
     Skips rows that are regional subtotals/headers.
-    Returns {state_name: supply_mu} dict.
-    Validates that the sum ≈ H8 (All-India total).
+    Returns (states_dict, h8_total) where h8_total is the All-India total from H8
+    (used both for validation here and stored in the CSV going forward).
     """
     states = {}
     for r in range(21, 60):
@@ -590,15 +590,16 @@ def _extract_statewise(ws: "_SheetAdapter") -> dict:
             continue
         states[name] = round(mu, 2)
 
+    total_h8 = _cell_float(ws, 8, 8)
+
     if not states:
         print("[GRID-STATE] WARNING: No statewise data extracted from rows 21–59.")
-        return states
+        return states, total_h8
 
     # Validation: sum of states ≈ H8 (All-India total energy met)
-    total_h8 = _cell_float(ws, 8, 8)
     if total_h8:
         state_sum = sum(states.values())
-        diff_pct  = abs(state_sum - total_h8) / total_h8 * 100 if total_h8 else 0
+        diff_pct  = abs(state_sum - total_h8) / total_h8 * 100
         if diff_pct > 5:
             print(f"[GRID-STATE] WARNING: State sum ({state_sum:.0f} MU) differs from "
                   f"H8 ({total_h8:.0f} MU) by {diff_pct:.1f}%")
@@ -607,31 +608,34 @@ def _extract_statewise(ws: "_SheetAdapter") -> dict:
                   f"({diff_pct:.1f}% diff). OK.")
 
     print(f"[GRID-STATE] Extracted {len(states)} states.")
-    return states
+    return states, total_h8
 
 
-def _append_statewise_csv(path: str, date_str: str, states: dict) -> None:
+def _append_statewise_csv(path: str, date_str: str, states: dict, h8_total=None) -> None:
     """
-    Append one row of statewise demand to statewise_demand.csv (wide format).
-    Header row (first row): date, <state1>, <state2>, ...  (states sorted alphabetically)
-    Data rows: DD/MM/YY, val1, val2, ...
+    Append one row of statewise supply to statewise_demand.csv (wide format).
+    Header row (first row): date, <state1>, <state2>, ..., all_india_h8
+    Data rows: DD/MM/YY, val1, val2, ..., h8_value
 
-    If the file doesn't exist, creates it with a header derived from `states`.
+    If the file doesn't exist, creates it with header derived from `states` + all_india_h8.
+    If `all_india_h8` column is missing from an existing file, adds it (one-time migration).
     If new states appear that aren't in the existing header, logs a warning and skips them.
     """
     import csv as _csv
     from pathlib import Path as _Path
 
     p = _Path(path)
+    H8_COL = "all_india_h8"
 
     if not p.exists():
         # First write: create header + data row
         sorted_states = sorted(states.keys())
         with open(p, "w", newline="") as f:
             w = _csv.writer(f)
-            w.writerow(["date"] + sorted_states)
-            w.writerow([date_str] + [states.get(s, "") for s in sorted_states])
-        print(f"[GRID-STATE] Created {p.name} with {len(sorted_states)} state columns.")
+            w.writerow(["date"] + sorted_states + [H8_COL])
+            h8_val = round(h8_total, 2) if h8_total else ""
+            w.writerow([date_str] + [states.get(s, "") for s in sorted_states] + [h8_val])
+        print(f"[GRID-STATE] Created {p.name} with {len(sorted_states)} state columns + {H8_COL}.")
         return
 
     # Read existing header
@@ -646,9 +650,20 @@ def _append_statewise_csv(path: str, date_str: str, states: dict) -> None:
         print(f"[GRID-STATE] WARNING: {p.name} has unexpected header. Skipping write.")
         return
 
-    existing_states = header[1:]
+    # One-time migration: add all_india_h8 column if missing
+    if H8_COL not in header:
+        print(f"[GRID-STATE] Migrating {p.name}: adding '{H8_COL}' column to header.")
+        with open(p, newline="") as f:
+            all_rows = list(_csv.reader(f))
+        all_rows[0] = all_rows[0] + [H8_COL]  # extend header
+        with open(p, "w", newline="") as f:
+            _csv.writer(f).writerows(all_rows)
+        header = all_rows[0]
 
-    # Check for new states not in header
+    existing_cols = header[1:]  # everything after "date"
+
+    # Check for new states not in header (excluding H8_COL)
+    existing_states = [c for c in existing_cols if c != H8_COL]
     new_states = [s for s in states if s not in existing_states]
     if new_states:
         print(f"[GRID-STATE] WARNING: New states not in existing header — skipping: {new_states}")
@@ -661,10 +676,10 @@ def _append_statewise_csv(path: str, date_str: str, states: dict) -> None:
                 with open(p, "a") as f2:
                     f2.write("\n")
 
+    h8_val = round(h8_total, 2) if h8_total else ""
+    row_vals = [date_str] + [states.get(s, "") for s in existing_states] + [h8_val]
     with open(p, "a", newline="") as f:
-        _csv.writer(f).writerow(
-            [date_str] + [states.get(s, "") for s in existing_states]
-        )
+        _csv.writer(f).writerow(row_vals)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -765,12 +780,12 @@ def scrape_grid_india(target_date=None, excel_url=None, force=False) -> bool:
         print("[GRID] WARNING: solar/nonsolar peak missing — not writing to Peak Demand Solar-NonSolar.csv")
 
     # Write statewise_demand.csv
-    statewise = _extract_statewise(ws)
+    statewise, h8_total = _extract_statewise(ws)
     if statewise:
         # Only write if date not already present in statewise CSV
         last_sw = _last_date_in_csv(CSV_PATHS["statewise_demand"])
         if not last_sw or last_sw < target_date:
-            _append_statewise_csv(CSV_PATHS["statewise_demand"], date_str, statewise)
+            _append_statewise_csv(CSV_PATHS["statewise_demand"], date_str, statewise, h8_total)
             wrote_any = True
         else:
             print(f"[GRID-STATE] Statewise data for {target_date} already present. Skipping.")

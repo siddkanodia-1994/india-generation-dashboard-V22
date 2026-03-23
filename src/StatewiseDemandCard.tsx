@@ -68,8 +68,12 @@ function parseStatewiseCsv(text: string): ParsedData {
   const lines = text.trim().split(/\r?\n/);
   if (lines.length < 2) return { states: [], rows: new Map() };
 
-  const headers = lines[0].split(",");
-  const states = headers.slice(1).map((s) => s.trim()).filter(Boolean);
+  const headers = lines[0].split(",").map((s) => s.trim());
+  // all_india_h8 is a special metadata column, not a state
+  const h8ColIdx = headers.indexOf("all_india_h8");
+  const states = headers
+    .slice(1)
+    .filter((s) => s && s !== "all_india_h8");
   const rows = new Map<string, Record<string, number>>();
 
   for (let i = 1; i < lines.length; i++) {
@@ -79,8 +83,16 @@ function parseStatewiseCsv(text: string): ParsedData {
     if (!dateKey) continue;
     const entry: Record<string, number> = {};
     for (let j = 0; j < states.length; j++) {
-      const v = parseFloat(cols[j + 1]);
+      // find correct column index (headers[j+1] may be offset if h8 col is before end)
+      const colIdx = headers.indexOf(states[j]);
+      if (colIdx < 0) continue;
+      const v = parseFloat(cols[colIdx]);
       if (!isNaN(v) && v > 0) entry[states[j]] = v;
+    }
+    // Store H8 value as special key
+    if (h8ColIdx >= 0) {
+      const h8 = parseFloat(cols[h8ColIdx]);
+      if (!isNaN(h8) && h8 > 0) entry["__h8__"] = h8;
     }
     rows.set(dateKey, entry);
   }
@@ -248,6 +260,21 @@ export default function StatewiseDemandCard() {
   const [showAvg, setShowAvg] = useState(false);
   const [avgWindow, setAvgWindow] = useState<7 | 14 | 30 | 45>(30);
   const [showYoY, setShowYoY] = useState(false);
+  const [showMismatches, setShowMismatches] = useState(false);
+
+  // H8 validation: flag dates where state sum differs from all_india_h8 by >2%
+  const h8Mismatches = useMemo(() => {
+    const flagged: { date: string; stateSum: number; h8: number; diffPct: number }[] = [];
+    for (const [dateKey, row] of data.rows) {
+      const h8 = row["__h8__"];
+      if (!h8) continue;
+      const stateSum = data.states.reduce((acc, s) => acc + (row[s] ?? 0), 0);
+      const diffPct = (stateSum - h8) / h8 * 100;
+      if (Math.abs(diffPct) > 2) flagged.push({ date: dateKey, stateSum, h8, diffPct });
+    }
+    return flagged.sort((a, b) => b.date.localeCompare(a.date));
+  }, [data]);
+
   type SortKey = 'state' | 'latest' | 'shareLatest' | 'yoy' | 'avgN' | 'avgYoY' | 'share';
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; dir: 'asc' | 'desc' } | null>(null);
   const handleSort = (key: SortKey) =>
@@ -353,7 +380,7 @@ export default function StatewiseDemandCard() {
   if (loading) {
     return (
       <div className="mt-4 flex items-center justify-center rounded-2xl bg-white p-10 ring-1 ring-slate-200">
-        <span className="text-sm text-slate-500">Loading statewise demand data…</span>
+        <span className="text-sm text-slate-500">Loading statewise supply data…</span>
       </div>
     );
   }
@@ -374,7 +401,7 @@ export default function StatewiseDemandCard() {
       <div className="rounded-2xl bg-white p-4 ring-1 ring-slate-200">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
-            <div className="text-base font-semibold text-slate-800">Statewise Power Demand</div>
+            <div className="text-base font-semibold text-slate-800">Statewise Power Supply</div>
             <div className="text-xs text-slate-500">Daily power supply in MU for each state (Grid India PSP)</div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -506,7 +533,7 @@ export default function StatewiseDemandCard() {
           <div className="rounded-2xl bg-white p-4 ring-1 ring-slate-200">
             {selectedStates.length === 0 ? (
               <div className="flex h-[380px] items-center justify-center text-sm text-slate-400">
-                Select one or more states from the panel to view their demand trend.
+                Select one or more states from the panel to view their supply trend.
               </div>
             ) : (
               <ResponsiveContainer width="100%" height={380}>
@@ -571,6 +598,48 @@ export default function StatewiseDemandCard() {
               </ResponsiveContainer>
             )}
           </div>
+
+          {/* H8 Data Quality Warning */}
+          {h8Mismatches.length > 0 && (
+            <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 p-3">
+              <div
+                className="flex cursor-pointer items-center justify-between"
+                onClick={() => setShowMismatches((v) => !v)}
+              >
+                <div className="flex items-center gap-2 text-[12px] font-semibold text-amber-800">
+                  <span>⚠</span>
+                  <span>Data Quality: {h8Mismatches.length} date{h8Mismatches.length > 1 ? "s" : ""} where state sum differs from All-India H8 by &gt;2%</span>
+                </div>
+                <span className="text-[11px] text-amber-600">{showMismatches ? "Hide ▲" : "Show ▼"}</span>
+              </div>
+              {showMismatches && (
+                <div className="mt-2 overflow-x-auto rounded-xl ring-1 ring-amber-200">
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="border-b border-amber-200 bg-amber-100">
+                        <th className="px-3 py-1.5 text-left font-semibold text-amber-700">Date</th>
+                        <th className="px-3 py-1.5 text-right font-semibold text-amber-700">State Sum (MU)</th>
+                        <th className="px-3 py-1.5 text-right font-semibold text-amber-700">H8 Total (MU)</th>
+                        <th className="px-3 py-1.5 text-right font-semibold text-amber-700">Diff %</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {h8Mismatches.map(({ date, stateSum, h8, diffPct }) => (
+                        <tr key={date} className="border-b border-amber-100">
+                          <td className="px-3 py-1 text-amber-800">{fmtTooltipDate(date)}</td>
+                          <td className="px-3 py-1 text-right text-amber-800">{stateSum.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+                          <td className="px-3 py-1 text-right text-amber-800">{h8.toLocaleString(undefined, { maximumFractionDigits: 1 })}</td>
+                          <td className={`px-3 py-1 text-right font-semibold ${diffPct > 0 ? "text-amber-700" : "text-red-600"}`}>
+                            {diffPct > 0 ? "+" : ""}{diffPct.toFixed(1)}%
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Summary table */}
           {selectedStates.length > 0 && (
