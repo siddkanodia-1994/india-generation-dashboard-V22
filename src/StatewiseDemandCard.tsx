@@ -173,6 +173,22 @@ function computeAvgYoY(
   return ((currentAvg - yoyAvg) / yoyAvg) * 100;
 }
 
+/** Single-day market share: state value / All-India total for that day */
+function computeLatestShare(
+  lastKey: string,
+  rows: Map<string, Record<string, number>>,
+  state: string,
+  allStates: string[]
+): number | null {
+  const row = rows.get(lastKey);
+  if (!row) return null;
+  const sv = row[state];
+  if (sv === undefined) return null;
+  const total = allStates.reduce((acc, s) => acc + (row[s] ?? 0), 0);
+  if (total <= 0) return null;
+  return (sv / total) * 100;
+}
+
 function computeMarketShare(
   sortedKeys: string[],
   rows: Map<string, Record<string, number>>,
@@ -360,17 +376,6 @@ export default function StatewiseDemandCard() {
               />
               {avgWindow}-day avg
             </label>
-            {/* Avg window dropdown — shared between chart and table */}
-            <select
-              value={avgWindow}
-              onChange={(e) => setAvgWindow(Number(e.target.value) as 7 | 14 | 30 | 45)}
-              className="rounded-xl border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
-            >
-              <option value={7}>Last 7-day Avg</option>
-              <option value={14}>Last 14-day Avg</option>
-              <option value={30}>Last 30-day Avg</option>
-              <option value={45}>Last 45-day Avg</option>
-            </select>
             {/* Date range */}
             <select
               value={rangeIdx}
@@ -434,6 +439,13 @@ export default function StatewiseDemandCard() {
             </div>
             {/* Quick actions */}
             <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setSelectedStates([...data.states])}
+                className="rounded-lg bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 ring-1 ring-slate-200 hover:bg-slate-50"
+              >
+                All
+              </button>
               <button
                 type="button"
                 onClick={() => {
@@ -551,11 +563,31 @@ export default function StatewiseDemandCard() {
           {/* Summary table */}
           {selectedStates.length > 0 && (
             <div className="mt-3 overflow-x-auto rounded-2xl bg-white ring-1 ring-slate-200">
+              {/* Table toolbar */}
+              <div className="flex items-center justify-between px-4 py-2 border-b border-slate-100">
+                <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Summary</span>
+                <select
+                  value={avgWindow}
+                  onChange={(e) => setAvgWindow(Number(e.target.value) as 7 | 14 | 30 | 45)}
+                  className="rounded-xl border border-slate-200 bg-white px-2 py-1 text-[11px] text-slate-700"
+                >
+                  <option value={7}>Last 7-day Avg</option>
+                  <option value={14}>Last 14-day Avg</option>
+                  <option value={30}>Last 30-day Avg</option>
+                  <option value={45}>Last 45-day Avg</option>
+                </select>
+              </div>
               <table className="w-full text-[12px]">
                 <thead>
                   <tr className="border-b border-slate-100">
                     <th className="px-4 py-2.5 text-left font-semibold text-slate-500">State</th>
-                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">Latest (MU)</th>
+                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">
+                      Latest (MU)
+                      {sortedKeys.length > 0 && (
+                        <span className="ml-1 font-normal text-slate-400">· {fmtXLabel(sortedKeys[sortedKeys.length - 1])}</span>
+                      )}
+                    </th>
+                    <th className="px-4 py-2.5 text-right font-semibold text-slate-500">Share (Latest)</th>
                     <th className="px-4 py-2.5 text-right font-semibold text-slate-500">YoY% (Latest)</th>
                     <th className="px-4 py-2.5 text-right font-semibold text-slate-500">{avgWindow}-day Avg (MU)</th>
                     <th className="px-4 py-2.5 text-right font-semibold text-slate-500">{avgWindow}d Avg YoY%</th>
@@ -564,7 +596,9 @@ export default function StatewiseDemandCard() {
                 </thead>
                 <tbody>
                   {selectedStates.map((s, i) => {
+                    const lastKey = sortedKeys[sortedKeys.length - 1];
                     const stats = computeStats(sortedKeys, filteredRows, s, avgWindow);
+                    const latestShare = lastKey ? computeLatestShare(lastKey, filteredRows, s, data.states) : null;
                     const avgYoY = computeAvgYoY(sortedKeys, filteredRows, s, avgWindow);
                     const share = computeMarketShare(sortedKeys, filteredRows, s, data.states, avgWindow);
                     const yoyPositive = stats.yoy !== null && stats.yoy >= 0;
@@ -582,6 +616,9 @@ export default function StatewiseDemandCard() {
                         </td>
                         <td className="px-4 py-2 text-right font-semibold text-slate-800">
                           {stats.latest !== null ? stats.latest.toLocaleString() : "—"}
+                        </td>
+                        <td className="px-4 py-2 text-right text-slate-500">
+                          {latestShare !== null ? `${latestShare.toFixed(1)}%` : "—"}
                         </td>
                         <td className={`px-4 py-2 text-right font-semibold ${
                           stats.yoy === null ? "text-slate-400" :
@@ -620,6 +657,19 @@ export default function StatewiseDemandCard() {
                         const lastRow = lastKey ? filteredRows.get(lastKey) : undefined;
                         const total = selectedStates.reduce((acc, s) => acc + (lastRow?.[s] ?? 0), 0);
                         return total > 0 ? total.toLocaleString(undefined, { maximumFractionDigits: 1 }) : "—";
+                      })()}
+                    </td>
+                    {/* Share (Latest) for total */}
+                    <td className="px-4 py-2.5 text-right font-semibold text-slate-700">
+                      {(() => {
+                        const lastKey = sortedKeys[sortedKeys.length - 1];
+                        if (!lastKey) return "—";
+                        const lastRow = filteredRows.get(lastKey);
+                        if (!lastRow) return "—";
+                        const allIndia = data.states.reduce((acc, s) => acc + (lastRow[s] ?? 0), 0);
+                        if (allIndia <= 0) return "—";
+                        const selTotal = selectedStates.reduce((acc, s) => acc + (lastRow[s] ?? 0), 0);
+                        return `${((selTotal / allIndia) * 100).toFixed(1)}%`;
                       })()}
                     </td>
                     {/* YoY% (Latest) for total */}
