@@ -299,7 +299,7 @@ def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
 
         for item in items:
             fp = item.get("FilePath", "")
-            if not fp.endswith(".xls"):
+            if not (fp.endswith(".xls") or fp.endswith(".xlsx")):
                 continue
             title = item.get("Title_", "")
             m = _re.match(r"(\d{2})\.(\d{2})\.(\d{2})_", title)
@@ -552,6 +552,121 @@ def _parse_mop_e(ws: _SheetAdapter) -> dict:
     return result
 
 
+# ── Statewise demand helpers ──────────────────────────────────────────────────
+
+# Keywords that indicate a row is a regional subtotal / header, not a state
+_SUBTOTAL_KEYWORDS = ("region", "total", "all india", "northern", "western",
+                      "southern", "eastern", "north eastern", "islands")
+
+
+def _extract_statewise(ws: "_SheetAdapter") -> dict:
+    """
+    Read rows 21–59 from MOP_E sheet:
+      Column B (index 2) = state name
+      Column C (index 3) = Power Supply in MU
+
+    Skips rows that are regional subtotals/headers.
+    Returns {state_name: supply_mu} dict.
+    Validates that the sum ≈ H8 (All-India total).
+    """
+    states = {}
+    for r in range(21, 60):
+        name_raw = ws.cell(row=r, column=2).value   # column B = entity/state name
+        val_raw  = ws.cell(row=r, column=5).value   # column E = Energy Met (MU)
+        if name_raw is None or val_raw is None:
+            continue
+        name = str(name_raw).strip()
+        if not name:
+            continue
+        # Skip subtotal/header rows
+        nl = name.lower()
+        if any(kw in nl for kw in _SUBTOTAL_KEYWORDS):
+            continue
+        try:
+            mu = float(str(val_raw).replace(",", "").strip())
+        except (ValueError, TypeError):
+            continue
+        if mu <= 0:
+            continue
+        states[name] = round(mu, 2)
+
+    if not states:
+        print("[GRID-STATE] WARNING: No statewise data extracted from rows 21–59.")
+        return states
+
+    # Validation: sum of states ≈ H8 (All-India total energy met)
+    total_h8 = _cell_float(ws, 8, 8)
+    if total_h8:
+        state_sum = sum(states.values())
+        diff_pct  = abs(state_sum - total_h8) / total_h8 * 100 if total_h8 else 0
+        if diff_pct > 5:
+            print(f"[GRID-STATE] WARNING: State sum ({state_sum:.0f} MU) differs from "
+                  f"H8 ({total_h8:.0f} MU) by {diff_pct:.1f}%")
+        else:
+            print(f"[GRID-STATE] State sum {state_sum:.0f} MU ≈ H8 {total_h8:.0f} MU "
+                  f"({diff_pct:.1f}% diff). OK.")
+
+    print(f"[GRID-STATE] Extracted {len(states)} states.")
+    return states
+
+
+def _append_statewise_csv(path: str, date_str: str, states: dict) -> None:
+    """
+    Append one row of statewise demand to statewise_demand.csv (wide format).
+    Header row (first row): date, <state1>, <state2>, ...  (states sorted alphabetically)
+    Data rows: DD/MM/YY, val1, val2, ...
+
+    If the file doesn't exist, creates it with a header derived from `states`.
+    If new states appear that aren't in the existing header, logs a warning and skips them.
+    """
+    import csv as _csv
+    from pathlib import Path as _Path
+
+    p = _Path(path)
+
+    if not p.exists():
+        # First write: create header + data row
+        sorted_states = sorted(states.keys())
+        with open(p, "w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(["date"] + sorted_states)
+            w.writerow([date_str] + [states.get(s, "") for s in sorted_states])
+        print(f"[GRID-STATE] Created {p.name} with {len(sorted_states)} state columns.")
+        return
+
+    # Read existing header
+    with open(p, newline="") as f:
+        reader = _csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration:
+            header = []
+
+    if not header or header[0].lower() != "date":
+        print(f"[GRID-STATE] WARNING: {p.name} has unexpected header. Skipping write.")
+        return
+
+    existing_states = header[1:]
+
+    # Check for new states not in header
+    new_states = [s for s in states if s not in existing_states]
+    if new_states:
+        print(f"[GRID-STATE] WARNING: New states not in existing header — skipping: {new_states}")
+
+    # Ensure trailing newline before appending
+    if p.stat().st_size > 0:
+        with open(p, "rb") as f:
+            f.seek(-1, 2)
+            if f.read(1) not in (b"\n", b"\r"):
+                with open(p, "a") as f2:
+                    f2.write("\n")
+
+    with open(p, "a", newline="") as f:
+        _csv.writer(f).writerow(
+            [date_str] + [states.get(s, "") for s in existing_states]
+        )
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def scrape_grid_india(target_date=None, excel_url=None, force=False) -> bool:
@@ -568,13 +683,14 @@ def scrape_grid_india(target_date=None, excel_url=None, force=False) -> bool:
         # Idempotency: check supply.csv as representative; all CSVs are written together
         last = _last_date_in_csv(CSV_PATHS["supply"])
         if last and last >= target_date:
-            # Also check solar-nonsolar separately (may lag if newly added)
+            # Also check solar-nonsolar and statewise separately (may lag if newly added)
             last_sn = _last_date_in_csv(CSV_PATHS["demand_solar_nonsolar"])
-            if last_sn and last_sn >= target_date:
+            last_sw = _last_date_in_csv(CSV_PATHS["statewise_demand"])
+            if last_sn and last_sn >= target_date and last_sw and last_sw >= target_date:
                 print(f"[GRID] Data for {target_date} already present in all CSVs. Skipping.")
                 return True
-            # Supply already written but solar-nonsolar missing — proceed to (re-)extract
-            print(f"[GRID] Supply up to date but solar-nonsolar CSV needs {target_date}. Proceeding.")
+            # Supply already written but some CSVs missing — proceed to (re-)extract
+            print(f"[GRID] Supply up to date but some CSVs need {target_date}. Proceeding.")
 
 
     print(f"[GRID] Looking for Excel file for {target_date}...")
@@ -647,6 +763,19 @@ def scrape_grid_india(target_date=None, excel_url=None, force=False) -> bool:
               f"nonsolar={data.get('nonsolar_peak_gw')} GW")
     else:
         print("[GRID] WARNING: solar/nonsolar peak missing — not writing to Peak Demand Solar-NonSolar.csv")
+
+    # Write statewise_demand.csv
+    statewise = _extract_statewise(ws)
+    if statewise:
+        # Only write if date not already present in statewise CSV
+        last_sw = _last_date_in_csv(CSV_PATHS["statewise_demand"])
+        if not last_sw or last_sw < target_date:
+            _append_statewise_csv(CSV_PATHS["statewise_demand"], date_str, statewise)
+            wrote_any = True
+        else:
+            print(f"[GRID-STATE] Statewise data for {target_date} already present. Skipping.")
+    else:
+        print("[GRID-STATE] WARNING: No statewise data extracted — skipping statewise CSV.")
 
     if wrote_any:
         print(f"[GRID] Done for {target_date}.")

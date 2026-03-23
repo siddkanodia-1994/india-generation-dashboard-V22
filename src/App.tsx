@@ -6,6 +6,7 @@ import RTMVsStocksDailyCard from "./RTMVsStocksDailyCard";
 import RatedCapacity from "./RatedCapacity";
 import LatestNews from "./LatestNews";
 import SummaryCard from "./SummaryCard";
+import StatewiseDemandCard from "./StatewiseDemandCard";
 
 export default function App() {
   return (
@@ -196,27 +197,42 @@ export default function App() {
           </TabPanel>
 
           {/* ===========================
-              Supply
+              Supply (WITH SUB-TABS)
               =========================== */}
           <TabPanel>
-            <ElectricityDashboard
-              type="supply"
-              title="India Electricity Supply Dashboard"
-              subtitle="Daily supply data, trends, and YoY/MoM analytics"
-              seriesLabel="Supply"
-              unitLabel="MU"
-              valueColumnKey="supply_gwh"
-              defaultCsvPath="/data/supply.csv"
-              enableAutoFetch={false}
-              calcMode="sum"
-              valueDisplay={{
-                suffix: " MU",
-                decimals: 0,
-              }}
-              extraBadgeCols={[]}
-              showYoyBadge={true}
-              mainBadgeLabel="Total"
-            />
+            <Tabs>
+              <div className="mt-2">
+                <TabList>
+                  <Tab>Total Supply</Tab>
+                  <Tab>Statewise Demand</Tab>
+                </TabList>
+              </div>
+
+              <TabPanel>
+                <ElectricityDashboard
+                  type="supply"
+                  title="India Electricity Supply Dashboard"
+                  subtitle="Daily supply data, trends, and YoY/MoM analytics"
+                  seriesLabel="Supply"
+                  unitLabel="MU"
+                  valueColumnKey="supply_gwh"
+                  defaultCsvPath="/data/supply.csv"
+                  enableAutoFetch={false}
+                  calcMode="sum"
+                  valueDisplay={{
+                    suffix: " MU",
+                    decimals: 0,
+                  }}
+                  extraBadgeCols={[]}
+                  showYoyBadge={true}
+                  mainBadgeLabel="Total"
+                />
+              </TabPanel>
+
+              <TabPanel>
+                <StatewiseDemandCard />
+              </TabPanel>
+            </Tabs>
           </TabPanel>
 
           {/* ===========================

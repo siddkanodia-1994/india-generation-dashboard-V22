@@ -50,6 +50,7 @@ CSV_PATHS = {
     "coal_plf":  os.path.join(BASE_DIR, "public", "data", "Coal PLF.csv"),
     "capacity":  os.path.join(BASE_DIR, "public", "data", "capacity.csv"),
     "stocks":    os.path.join(BASE_DIR, "public", "data", "stock.xlsx"),
+    "statewise_demand": os.path.join(BASE_DIR, "public", "data", "statewise_demand.csv"),
 }
 
 # ── IEX API base URLs ─────────────────────────────────────────────────────────
