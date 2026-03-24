@@ -11,7 +11,7 @@
     <string>/Users/siddhantkanodia/Documents/Claude Working Folder/Power Daily Data/india-generation-dashboard-V21/scripts/run_local.sh</string>
   </array>
 
-  <!-- Runs at 9:00, 9:30, 10:00, 10:30, 11:00am IST (Mac must be set to IST) -->
+  <!-- Runs every 30 min, 9:00am–1:00pm IST (Mac must be set to IST) -->
   <key>StartCalendarInterval</key>
   <array>
     <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
@@ -19,6 +19,10 @@
     <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>0</integer></dict>
     <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>30</integer></dict>
     <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>0</integer></dict>
+    <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>30</integer></dict>
+    <dict><key>Hour</key><integer>13</integer><key>Minute</key><integer>0</integer></dict>
   </array>
 
   <key>StandardOutPath</key>

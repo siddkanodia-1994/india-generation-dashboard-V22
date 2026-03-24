@@ -1,6 +1,6 @@
 #!/bin/bash
 # Local Mac automation for Grid India PSP scraper.
-# Installed as a launchd job — runs at 9:00, 9:30, 10:00, 10:30, 11:00am IST daily.
+# Installed as a launchd job — runs every 30 min, 9:00 AM–1:00 PM IST daily.
 # Idempotent: skips gracefully if data already present or not yet published.
 
 REPO="/Users/siddhantkanodia/Documents/Claude Working Folder/Power Daily Data/india-generation-dashboard-V21"
