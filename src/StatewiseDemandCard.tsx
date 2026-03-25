@@ -137,7 +137,7 @@ function computeStats(
   let yoyVal: number | null = null;
   for (let delta = 0; delta <= 3; delta++) {
     for (const sign of [0, 1, -1]) {
-      const tryDate = new Date(y - 1, m - 1, d + sign * delta);
+      const tryDate = new Date(Date.UTC(y - 1, m - 1, d + sign * delta));
       const tryKey = tryDate.toISOString().slice(0, 10);
       const v = rows.get(tryKey)?.[state];
       if (v !== undefined) { yoyVal = v; break; }
@@ -172,7 +172,7 @@ function computeAvgYoY(
     let found = false;
     for (let delta = 0; delta <= 3 && !found; delta++) {
       for (const sign of [0, 1, -1]) {
-        const tryDate = new Date(y - 1, m - 1, d + sign * delta);
+        const tryDate = new Date(Date.UTC(y - 1, m - 1, d + sign * delta));
         const tryKey = tryDate.toISOString().slice(0, 10);
         const v = rows.get(tryKey)?.[state];
         if (v !== undefined) { yoyVals.push(v); found = true; break; }
@@ -341,7 +341,7 @@ export default function StatewiseDemandCard() {
           let yoyVal: number | undefined;
           for (let delta = 0; delta <= 3 && !yoyVal; delta++) {
             for (const sign of [0, 1, -1]) {
-              const tryDate = new Date(y - 1, m - 1, d + sign * delta);
+              const tryDate = new Date(Date.UTC(y - 1, m - 1, d + sign * delta));
               const tryKey = tryDate.toISOString().slice(0, 10);
               const v = filteredRows.get(tryKey)?.[s];
               if (v !== undefined) { yoyVal = v; break; }
@@ -802,7 +802,7 @@ export default function StatewiseDemandCard() {
                         let yoyFound = false;
                         for (let delta = 0; delta <= 3; delta++) {
                           for (const sign of [0, 1, -1]) {
-                            const tryDate = new Date(y - 1, m - 1, d + sign * delta);
+                            const tryDate = new Date(Date.UTC(y - 1, m - 1, d + sign * delta));
                             const tryKey = tryDate.toISOString().slice(0, 10);
                             const tryRow = filteredRows.get(tryKey);
                             if (tryRow) {
@@ -855,7 +855,7 @@ export default function StatewiseDemandCard() {
                           let found = false;
                           for (let delta = 0; delta <= 3 && !found; delta++) {
                             for (const sign of [0, 1, -1]) {
-                              const tryDate = new Date(y - 1, m - 1, d + sign * delta);
+                              const tryDate = new Date(Date.UTC(y - 1, m - 1, d + sign * delta));
                               const tryKey = tryDate.toISOString().slice(0, 10);
                               const tryRow = filteredRows.get(tryKey);
                               if (tryRow) {
