@@ -8,7 +8,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>/Users/siddhantkanodia/Documents/Claude Working Folder/Power Daily Data/india-generation-dashboard-V21/scripts/run_local.sh</string>
+    <string>/Users/siddhantkanodia/run_india_scraper.sh</string>
   </array>
 
   <!-- Runs every 30 min, 9:00am–1:00pm IST (Mac must be set to IST) -->
