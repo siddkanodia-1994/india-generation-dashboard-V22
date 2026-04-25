@@ -421,8 +421,11 @@ export default function SummaryCard({ rtmCsvUrl, supplyCsvUrl }: SummaryCardProp
     // FY YTD supply
     const fyStartYear = month >= 4 ? year : year - 1;
     const ytdStart = `${fyStartYear}-04-01`;
-    const ytdSupCurr = rangeSum(supplyMap, ytdStart, ref);
-    const ytdSupPrior = rangeSum(supplyMap, `${fyStartYear - 1}-04-01`, isoMinusDays(ref, 365));
+    // Use last date with actual data in current FY window (not selectedDate) so prior period
+    // covers the same number of days — prevents asymmetric comparison when today's data isn't published yet
+    const ytdLastAvail = [...supplyMap.keys()].filter(k => k >= ytdStart && k <= ref).sort().at(-1) ?? ref;
+    const ytdSupCurr = rangeSum(supplyMap, ytdStart, ytdLastAvail);
+    const ytdSupPrior = rangeSum(supplyMap, `${fyStartYear - 1}-04-01`, isoMinusDays(ytdLastAvail, 365));
     const ytdYoy = growthPct(ytdSupCurr, ytdSupPrior);
     const fyLabel = `Apr ${fyStartYear} – ${monthLabel(year, month)}`;
 
