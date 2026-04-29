@@ -41,7 +41,7 @@ jobs:
         run: |
           cd scripts
           python scrape_stocks.py
-        continue-on-error: false
+        continue-on-error: true   # Don't block commit if Screener.in is unavailable
 
       - name: Run DAM scraper
         run: |

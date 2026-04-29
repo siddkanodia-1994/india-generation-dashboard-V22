@@ -212,7 +212,20 @@ def _scrape_nse_price(ticker: str):
         return None
 
 
-def _fetch_trendlyne_pb(ticker: str) -> float | None:
+def _yfinance_price(ticker: str):
+    """Fetch last close price via yfinance (Yahoo Finance) — works from any IP."""
+    try:
+        import yfinance as yf
+        t = yf.Ticker(f"{ticker}.NS")
+        hist = t.history(period="5d")
+        if not hist.empty:
+            return float(hist["Close"].iloc[-1])
+    except Exception as e:
+        print(f"[STOCKS] yfinance fallback failed for {ticker}: {e}")
+    return None
+
+
+def _fetch_trendlyne_pb(ticker: str):
     """Fetch latest P/B ratio from Trendlyne API (consolidated book value)."""
     tl_id = TRENDLYNE_IDS.get(ticker)
     if not tl_id:
@@ -305,9 +318,13 @@ def scrape_stocks(target_date=None):
     if target_date is None:
         target_date = datetime.now(_IST).date() - timedelta(days=1)
 
+    if target_date.weekday() in (5, 6):  # Saturday=5, Sunday=6
+        print(f"[STOCKS] {target_date} is a weekend — skipping (no trading).")
+        return True
+
     print(f"[STOCKS] Scraping {len(STOCK_TICKERS)} tickers for {target_date}...")
 
-    results: dict[str, dict | None] = {}
+    results = {}
     for ticker in STOCK_TICKERS:
         print(f"[STOCKS] Fetching {ticker}...")
         data = _scrape_screener(ticker)
@@ -318,6 +335,14 @@ def scrape_stocks(target_date=None):
             if nse_price is not None:
                 data = data or {}
                 data["price"] = nse_price
+        # yfinance fallback: works from any IP including GitHub Actions
+        if data is None or data.get("price") is None:
+            print(f"[STOCKS] {ticker}: NSE fallback unavailable, trying yfinance...")
+            yf_price = _yfinance_price(ticker)
+            if yf_price is not None:
+                data = data or {}
+                data["price"] = yf_price
+                print(f"[STOCKS] {ticker}: yfinance price={yf_price}")
         results[ticker] = data if data else None
         if data:
             print(f"[STOCKS] {ticker}: price={data.get('price')}, P/B={data.get('pb')}")
