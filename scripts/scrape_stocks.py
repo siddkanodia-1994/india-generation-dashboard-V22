@@ -15,7 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import CSV_PATHS, SCREENER_BASE_URL, STOCK_TICKERS, TICKER_COLUMN_NAMES
+from config import CSV_PATHS, SCREENER_BASE_URL, STOCK_TICKERS, TICKER_COLUMN_NAMES, TRENDLYNE_IDS
 
 HEADERS = {
     "User-Agent": (
@@ -212,6 +212,24 @@ def _scrape_nse_price(ticker: str):
         return None
 
 
+def _fetch_trendlyne_pb(ticker: str) -> float | None:
+    """Fetch latest P/B ratio from Trendlyne API (consolidated book value)."""
+    tl_id = TRENDLYNE_IDS.get(ticker)
+    if not tl_id:
+        return None
+    try:
+        r = SESSION.get(
+            f"https://trendlyne.com/mapp/v1/stock/chart-data/{tl_id}/PBV_A_SHARE_NOW/",
+            timeout=10,
+        )
+        pts = r.json().get("body", {}).get("eodData", [])
+        if pts:
+            return round(pts[0][1], 2)  # pts[0] = latest [timestamp_ms, pb_value]
+    except Exception as e:
+        print(f"[STOCKS] Trendlyne P/B fetch failed for {ticker}: {e}")
+    return None
+
+
 # ── XLSX update ───────────────────────────────────────────────────────────────
 
 def _update_xlsx(results, target_date):
@@ -300,6 +318,17 @@ def scrape_stocks(target_date=None):
             if nse_price is not None:
                 data = data or {}
                 data["price"] = nse_price
+        # Override P/B with Trendlyne (consolidated book value — more reliable than Screener)
+        tl_pb = _fetch_trendlyne_pb(ticker)
+        if tl_pb is not None:
+            if data is None:
+                data = {"price": None}
+            data["pb"] = tl_pb
+            print(f"[STOCKS] {ticker}: Trendlyne P/B={tl_pb}")
+        elif data:
+            data["pb"] = None  # suppress Screener's P/B; don't write stale standalone value
+            print(f"[STOCKS] {ticker}: Trendlyne P/B unavailable — P/B will not be written")
+
         results[ticker] = data if data else None
         if data:
             print(f"[STOCKS] {ticker}: price={data.get('price')}, P/B={data.get('pb')}")

@@ -68,6 +68,22 @@ ICED_NITI_URL = "https://iced.niti.gov.in/"
 # ── Screener.in ──────────────────────────────────────────────────────────────
 SCREENER_BASE_URL = "https://www.screener.in/company/{ticker}/"
 
+# ── Trendlyne — stock IDs for P/B API (consolidated book value) ───────────────
+# API: GET https://trendlyne.com/mapp/v1/stock/chart-data/{ID}/PBV_A_SHARE_NOW/
+TRENDLYNE_IDS = {
+    "ACMESOLAR":  2759890,
+    "ADANIGREEN": 93115,
+    "ADANIPOWER": 28,
+    "CESC":       256,
+    "INOXWIND":   1627,
+    "JSWENERGY":  697,
+    "NTPC":       959,
+    "PFC":        1026,
+    "RECLTD":     1119,
+    "SUZLON":     1337,
+    "TATAPOWER":  1364,
+}
+
 # ── RTM solar/non-solar time blocks (15-min intervals, 1-indexed, IST) ────────
 # Block 1  = 00:00–00:15 IST
 # Block 25 = 06:00–06:15 IST  ← solar hours start
