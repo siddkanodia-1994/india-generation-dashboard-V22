@@ -318,17 +318,6 @@ def scrape_stocks(target_date=None):
             if nse_price is not None:
                 data = data or {}
                 data["price"] = nse_price
-        # Override P/B with Trendlyne (consolidated book value — more reliable than Screener)
-        tl_pb = _fetch_trendlyne_pb(ticker)
-        if tl_pb is not None:
-            if data is None:
-                data = {"price": None}
-            data["pb"] = tl_pb
-            print(f"[STOCKS] {ticker}: Trendlyne P/B={tl_pb}")
-        elif data:
-            data["pb"] = None  # suppress Screener's P/B; don't write stale standalone value
-            print(f"[STOCKS] {ticker}: Trendlyne P/B unavailable — P/B will not be written")
-
         results[ticker] = data if data else None
         if data:
             print(f"[STOCKS] {ticker}: price={data.get('price')}, P/B={data.get('pb')}")
