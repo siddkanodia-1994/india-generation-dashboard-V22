@@ -741,6 +741,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
   const [extraBadgeLatestValues, setExtraBadgeLatestValues] = useState<Map<string, number>>(new Map());
   const [extraBadgeTextValues, setExtraBadgeTextValues] = useState<Map<string, string>>(new Map());
   const [textByDate, setTextByDate] = useState<Map<string, Map<string, string>>>(new Map());
+  const [recentLimit, setRecentLimit] = useState<number | "all">(25);
 
   const [fromIso, setFromIso] = useState("");
   const [toIso, setToIso] = useState("");
@@ -2262,7 +2263,24 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
             )}
           </Card>
 
-          <Card title="Recent entries">
+          <Card
+            title="Recent entries"
+            right={
+              hasData ? (
+                <select
+                  value={recentLimit}
+                  onChange={(e) =>
+                    setRecentLimit(e.target.value === "all" ? "all" : Number(e.target.value))
+                  }
+                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 focus:outline-none"
+                >
+                  <option value={25}>Show: 25</option>
+                  <option value={50}>Show: 50</option>
+                  <option value="all">Show: All</option>
+                </select>
+              ) : null
+            }
+          >
             {!hasData ? (
               <div className="text-sm text-slate-600">Once you add data, the most recent entries will appear here.</div>
             ) : (
@@ -2285,8 +2303,7 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
                         </tr>
                       </thead>
                       <tbody>
-                        {sortedDaily
-                          .slice(-25)
+                        {(recentLimit === "all" ? sortedDaily.slice(0) : sortedDaily.slice(-recentLimit))
                           .reverse()
                           .map((r) => (
                             <tr key={r.date} className="border-t border-slate-100">
