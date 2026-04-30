@@ -2267,36 +2267,50 @@ export default function ElectricityDashboard(props: ElectricityDashboardProps) {
               <div className="text-sm text-slate-600">Once you add data, the most recent entries will appear here.</div>
             ) : (
               <div className="max-h-[420px] overflow-auto rounded-xl ring-1 ring-slate-200">
-                <table className="w-full border-collapse bg-white text-left text-sm">
-                  <thead className="sticky top-0 bg-slate-50">
-                    <tr>
-                      <th className="px-3 py-2 text-xs font-semibold text-slate-600">Date</th>
-                      <th className="px-3 py-2 text-xs font-semibold text-slate-600">
-                        {seriesLabel} ({unitLabel})
-                      </th>
-                      <th className="px-3 py-2 text-xs font-semibold text-slate-600"></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedDaily
-                      .slice(-25)
-                      .reverse()
-                      .map((r) => (
-                        <tr key={r.date} className="border-t border-slate-100">
-                          <td className="px-3 py-2 font-medium text-slate-900">{formatDDMMYYYY(r.date)}</td>
-                          <td className="px-3 py-2 text-slate-700">{fmtValue(r.value)}</td>
-                          <td className="px-3 py-2 text-right">
-                            <button
-                              onClick={() => removeDate(r.date)}
-                              className="rounded-lg px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
-                            >
-                              Remove
-                            </button>
-                          </td>
+                {(() => {
+                  const timeTextCol = extraBadgeCols?.find(c => c.isText);
+                  const showTimeCol = (type === "demand-solar" || type === "demand-nonsolar") && !!timeTextCol;
+                  return (
+                    <table className="w-full border-collapse bg-white text-left text-sm">
+                      <thead className="sticky top-0 bg-slate-50">
+                        <tr>
+                          <th className="px-3 py-2 text-xs font-semibold text-slate-600">Date</th>
+                          <th className="px-3 py-2 text-xs font-semibold text-slate-600">
+                            {seriesLabel} ({unitLabel})
+                          </th>
+                          {showTimeCol && (
+                            <th className="px-3 py-2 text-xs font-semibold text-slate-600">Time</th>
+                          )}
+                          <th className="px-3 py-2 text-xs font-semibold text-slate-600"></th>
                         </tr>
-                      ))}
-                  </tbody>
-                </table>
+                      </thead>
+                      <tbody>
+                        {sortedDaily
+                          .slice(-25)
+                          .reverse()
+                          .map((r) => (
+                            <tr key={r.date} className="border-t border-slate-100">
+                              <td className="px-3 py-2 font-medium text-slate-900">{formatDDMMYYYY(r.date)}</td>
+                              <td className="px-3 py-2 text-slate-700">{fmtValue(r.value)}</td>
+                              {showTimeCol && (
+                                <td className="px-3 py-2 text-slate-700">
+                                  {textByDate.get(formatDDMMYYYY(r.date))?.get(timeTextCol!.key) ?? "—"}
+                                </td>
+                              )}
+                              <td className="px-3 py-2 text-right">
+                                <button
+                                  onClick={() => removeDate(r.date)}
+                                  className="rounded-lg px-2 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                                >
+                                  Remove
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  );
+                })()}
               </div>
             )}
           </Card>
