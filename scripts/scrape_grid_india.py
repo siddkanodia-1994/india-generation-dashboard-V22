@@ -167,7 +167,7 @@ def _find_excel_url_via_cdn_probe(target_date: date):
     Last-resort fallback: probe the CDN directly with parallel GET requests.
     The CDN (webcdn.grid-india.in) has no IP restrictions and is always accessible.
     URL format: https://webcdn.grid-india.in/files/grdw/{YYYY}/{MM}/{date_prefix}_NLDC_PSP_{N}.xls[x]
-    N is unknown but always in 1-999 range (observed: 234, 278, 632, 828).
+    N is unknown but observed up to 929; probing 1-1499 for safety margin.
     Both .xls and .xlsx extensions are tried (Grid India uses both).
     With 50 concurrent workers this typically completes in under 5 seconds.
     """
@@ -179,7 +179,7 @@ def _find_excel_url_via_cdn_probe(target_date: date):
     date_prefix = target_date.strftime("%d.%m.%y")
     base        = f"{_GRID_CDN_BASE}/files/grdw/{year}/{month}/{date_prefix}_NLDC_PSP"
 
-    print(f"[GRID] Probing CDN for {date_prefix} (N=1–999, .xls/.xlsx, 50 workers)...")
+    print(f"[GRID] Probing CDN for {date_prefix} (N=1–1499, .xls/.xlsx, 50 workers)...")
 
     found  = threading.Event()
     result = [None]
@@ -202,7 +202,7 @@ def _find_excel_url_via_cdn_probe(target_date: date):
                 pass
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-        executor.map(check, range(1, 1000))
+        executor.map(check, range(1, 1500))
 
     if result[0]:
         print(f"[GRID] CDN probe found: {result[0]}")
@@ -214,12 +214,25 @@ def _find_excel_url_via_cdn_probe(target_date: date):
 
 def _find_excel_url(target_date: date):
     """
-    Use Grid India REST API to find the XLS download URL for target_date.
-    Falls back to Supabase proxy, then CDN probe if API is IP-blocked.
+    Discover the XLS download URL for target_date.
+
+    On GitHub Actions, webapi.grid-india.in consistently resets SSL connections
+    from cloud IPs (curl error 35), and the Supabase proxy calls the same blocked
+    endpoint — so both are skipped. The CDN (webcdn.grid-india.in) has no IP
+    restrictions and is used directly.
+
+    Locally: try the API first (fastest when reachable), then CDN probe.
     """
-    fy           = _fy_label(target_date)           # e.g. "2025-26"
-    month        = target_date.strftime("%m")        # e.g. "03"
-    date_prefix  = target_date.strftime("%d.%m.%y") # e.g. "18.03.26"
+    import os as _os
+
+    if _os.environ.get("GITHUB_ACTIONS"):
+        print(f"[GRID] GitHub Actions — skipping blocked API, probing CDN directly for {target_date}...")
+        return _find_excel_url_via_cdn_probe(target_date)
+
+    # ── Local path: API first, CDN probe as fallback ───────────────────────────
+    fy           = _fy_label(target_date)
+    month        = target_date.strftime("%m")
+    date_prefix  = target_date.strftime("%d.%m.%y")
 
     print(f"[GRID] Querying Grid India API for {target_date} (FY={fy}, month={month})...")
     items = None
@@ -242,9 +255,7 @@ def _find_excel_url(target_date: date):
                 _time.sleep(5 * attempt)  # 5s, 10s back-off
 
     if items is None:
-        # API unreachable — try Supabase proxy, then CDN probe
-        url = _find_excel_url_via_proxy(target_date)
-        return url if url else _find_excel_url_via_cdn_probe(target_date)
+        return _find_excel_url_via_cdn_probe(target_date)
 
     for item in items:
         fp = item.get("FilePath", "")
@@ -254,9 +265,7 @@ def _find_excel_url(target_date: date):
             return url
 
     print(f"[GRID] No XLS found for {date_prefix} in API response ({len(items)} files).")
-    # API returned results but no match — try Supabase proxy, then CDN probe
-    url = _find_excel_url_via_proxy(target_date)
-    return url if url else _find_excel_url_via_cdn_probe(target_date)
+    return _find_excel_url_via_cdn_probe(target_date)
 
 
 def _collect_all_excel_urls(start_date: date, end_date: date) -> dict:
