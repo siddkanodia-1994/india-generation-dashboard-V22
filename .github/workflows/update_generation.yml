@@ -48,6 +48,7 @@ jobs:
         id: scrape
         run: |
           cd scripts
+          set +e
           python run_all.py --mode generation
           echo "exit_code=$?" >> $GITHUB_OUTPUT
         continue-on-error: true

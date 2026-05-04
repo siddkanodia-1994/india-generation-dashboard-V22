@@ -662,11 +662,22 @@ def _append_statewise_csv(path: str, date_str: str, states: dict, h8_total=None)
 
     existing_cols = header[1:]  # everything after "date"
 
-    # Check for new states not in header (excluding H8_COL)
+    # Auto-migrate: add new state columns before the h8 column (insert before last col)
     existing_states = [c for c in existing_cols if c != H8_COL]
-    new_states = [s for s in states if s not in existing_states]
+    new_states = sorted(s for s in states if s not in existing_states)
     if new_states:
-        print(f"[GRID-STATE] WARNING: New states not in existing header — skipping: {new_states}")
+        print(f"[GRID-STATE] New states detected — adding columns: {new_states}")
+        with open(p, newline="") as f:
+            all_rows = list(_csv.reader(f))
+        h8_idx = all_rows[0].index(H8_COL) if H8_COL in all_rows[0] else len(all_rows[0])
+        for row in all_rows:
+            row[h8_idx:h8_idx] = [""] * len(new_states)
+        all_rows[0][h8_idx:h8_idx] = new_states
+        with open(p, "w", newline="") as f:
+            _csv.writer(f).writerows(all_rows)
+        header = all_rows[0]
+        existing_cols = header[1:]
+        existing_states = [c for c in existing_cols if c != H8_COL]
 
     # Ensure trailing newline before appending
     if p.stat().st_size > 0:
