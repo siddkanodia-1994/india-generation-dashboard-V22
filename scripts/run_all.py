@@ -118,7 +118,9 @@ def mode_generation() -> bool:
             break
 
     plf_ok = run("Coal PLF (ICED NITI)", scrape_coal_plf)
-    return grid_ok and plf_ok
+    if not plf_ok:
+        print("[WARN] Coal PLF failed — Grid India data will still be committed.")
+    return grid_ok
 
 
 def mode_capacity() -> bool:

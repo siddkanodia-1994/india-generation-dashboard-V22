@@ -26,9 +26,9 @@
   </array>
 
   <key>StandardOutPath</key>
-  <string>/Users/siddhantkanodia/Documents/Claude Working Folder/Power Daily Data/india-generation-dashboard-V21/scripts/run_local.log</string>
+  <string>/Users/siddhantkanodia/scraper.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/siddhantkanodia/Documents/Claude Working Folder/Power Daily Data/india-generation-dashboard-V21/scripts/run_local.log</string>
+  <string>/Users/siddhantkanodia/scraper.log</string>
 
   <!-- Do not run immediately on load -->
   <key>RunAtLoad</key>
