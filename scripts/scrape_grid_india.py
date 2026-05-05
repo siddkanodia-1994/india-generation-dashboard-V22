@@ -679,9 +679,9 @@ def _append_statewise_csv(path: str, date_str: str, states: dict, h8_total=None)
         with open(p, newline="") as f:
             all_rows = list(_csv.reader(f))
         h8_idx = all_rows[0].index(H8_COL) if H8_COL in all_rows[0] else len(all_rows[0])
-        for row in all_rows:
+        all_rows[0][h8_idx:h8_idx] = new_states          # insert names in header
+        for row in all_rows[1:]:                          # empty values in data rows only
             row[h8_idx:h8_idx] = [""] * len(new_states)
-        all_rows[0][h8_idx:h8_idx] = new_states
         with open(p, "w", newline="") as f:
             _csv.writer(f).writerows(all_rows)
         header = all_rows[0]
