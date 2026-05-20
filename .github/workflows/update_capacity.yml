@@ -2,8 +2,10 @@ name: Update Capacity Data (ICED NITI - Monthly)
 
 on:
   schedule:
-    # Run on the 5th of each month at 4:30am UTC (10am IST)
+    # Run on the 5th and 20th of each month at 4:30am UTC (10am IST)
+    # Two runs per month catches both on-time and delayed ICED NITI data
     - cron: "30 4 5 * *"
+    - cron: "30 4 20 * *"
   workflow_dispatch:   # Allow manual trigger
 
 jobs:
@@ -48,5 +50,13 @@ jobs:
             echo "No capacity data changes to commit."
           else
             git commit -m "auto: update capacity data $(date -u +'%Y-%m')"
-            git push
+            for attempt in 1 2 3; do
+              if git push; then
+                echo "Push succeeded on attempt $attempt"
+                break
+              fi
+              echo "Push attempt $attempt failed — rebasing..."
+              git pull --rebase origin main
+              sleep $((attempt * 5))
+            done
           fi
