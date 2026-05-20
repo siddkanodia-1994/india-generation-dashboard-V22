@@ -67,9 +67,10 @@ const PLF_COL_LABELS: Record<PLFSource, string> = {
   "Bio Power": "Others†",
 };
 
-const PLF_CAP_KEY   = "peakDemandPLF_capacity";
-const PLF_MAINT_KEY = "peakDemandPLF_maint";
-const DEFAULT_MAINT = 5;
+const PLF_CAP_KEY    = "peakDemandPLF_capacity";
+const PLF_MAINT_KEY  = "peakDemandPLF_maint";
+const DEFAULT_MAINT  = 5;
+const MAINT_PRESETS  = [0, 2, 5, 8, 10, 15, 20];
 
 async function fetchLatestCapacity(): Promise<Record<PLFSource, number>> {
   const res = await fetch("/data/capacity.csv");
@@ -552,7 +553,32 @@ function PeakDemandPLFCard({ latestRow }: { latestRow: DemandSourceRow | null })
 
               {/* Row 2: Maintenance % */}
               <tr className="border-t border-slate-100">
-                <td className="px-3 py-2 font-semibold text-slate-800 text-xs">Maintenance (%)</td>
+                <td className="px-3 py-2 text-xs">
+                  <div className="font-semibold text-slate-800">Maintenance (%)</div>
+                  {(() => {
+                    const firstVal = maint[PLF_SOURCES[0]];
+                    const allEqual = PLF_SOURCES.every(s => maint[s] === firstVal);
+                    const isPreset = MAINT_PRESETS.includes(firstVal);
+                    const globalVal = allEqual && isPreset ? String(firstVal) : "";
+                    const isCustom  = !allEqual || !isPreset;
+                    return (
+                      <select
+                        value={globalVal}
+                        onChange={e => {
+                          const v = parseFloat(e.target.value);
+                          if (!isNaN(v))
+                            setMaint(Object.fromEntries(PLF_SOURCES.map(s => [s, v])) as Record<PLFSource, number>);
+                        }}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-slate-300"
+                      >
+                        {isCustom && <option value="">Custom</option>}
+                        {MAINT_PRESETS.map(v => (
+                          <option key={v} value={String(v)}>{v}% — all sources</option>
+                        ))}
+                      </select>
+                    );
+                  })()}
+                </td>
                 {PLF_SOURCES.map(s => (
                   <td key={s} className="px-2 py-1.5">
                     <input
