@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BarChart,
   Bar,
@@ -43,6 +43,59 @@ const RANGE_OPTIONS = [
   { label: "Last 6 months", days: 180 },
   { label: "All",           days: 0   },
 ] as const;
+
+// ── PLF card constants ────────────────────────────────────────────────────────
+
+type PLFSource = "Coal" | "Oil & Gas" | "Nuclear" | "Hydro" | "Solar" | "Wind" | "Bio Power";
+const PLF_SOURCES: PLFSource[] = ["Coal", "Oil & Gas", "Nuclear", "Hydro", "Solar", "Wind", "Bio Power"];
+
+const PLF_TO_AVG: Record<PLFSource, keyof Pick<AvgDailyRow, "thermal"|"gas"|"nuclear"|"hydro"|"solar"|"wind"|"others">> = {
+  "Coal":      "thermal",
+  "Oil & Gas": "gas",
+  "Nuclear":   "nuclear",
+  "Hydro":     "hydro",
+  "Solar":     "solar",
+  "Wind":      "wind",
+  "Bio Power": "others",
+};
+
+const PLF_COL_LABELS: Record<PLFSource, string> = {
+  "Coal":      "Coal",
+  "Oil & Gas": "Oil & Gas",
+  "Nuclear":   "Nuclear",
+  "Hydro":     "Hydro*",
+  "Solar":     "Solar",
+  "Wind":      "Wind",
+  "Bio Power": "Others†",
+};
+
+const PLF_CAP_KEY   = "peakDemandPLF_capacity";
+const PLF_MAINT_KEY = "peakDemandPLF_maint";
+const DEFAULT_MAINT = 5;
+const MAINT_PRESETS = [0, 2, 5, 8, 10, 15, 20];
+
+async function fetchLatestCapacity(): Promise<Record<PLFSource, number>> {
+  const res = await fetch("/data/capacity.csv");
+  if (!res.ok) throw new Error(`capacity.csv HTTP ${res.status}`);
+  const text = await res.text();
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) throw new Error("empty capacity.csv");
+  const header = lines[0].replace(/^﻿/, "").split(",").map(h => h.trim().toLowerCase());
+  const lastRow = lines[lines.length - 1].split(",").map(c => c.trim());
+  const col = (name: string) => {
+    const idx = header.indexOf(name.toLowerCase());
+    return idx >= 0 ? parseFloat(lastRow[idx] ?? "0") || 0 : 0;
+  };
+  return {
+    "Coal":      col("coal"),
+    "Oil & Gas": col("oil & gas"),
+    "Nuclear":   col("nuclear"),
+    "Hydro":     col("hydro") + col("small-hydro"),
+    "Solar":     col("solar"),
+    "Wind":      col("wind"),
+    "Bio Power": col("bio power"),
+  };
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -120,6 +173,259 @@ function parseCsv(text: string): AvgDailyRow[] {
   }
 
   return rows.sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+}
+
+// ── Avg Daily PLF Card ────────────────────────────────────────────────────────
+
+function AvgDailyPLFCard({ rows }: { rows: AvgDailyRow[] }) {
+  const latest = rows.length > 0 ? rows[rows.length - 1] : null;
+  const [plfDate, setPlfDate] = useState<string | null>(null);
+  const kpiRow = plfDate ? (rows.find(r => r.dateKey === plfDate) ?? latest) : latest;
+
+  const [capacity, setCapacity] = useState<Record<PLFSource, number>>(() => {
+    try {
+      const raw = localStorage.getItem(PLF_CAP_KEY);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        const out = Object.fromEntries(PLF_SOURCES.map(s => [s, 0])) as Record<PLFSource, number>;
+        for (const s of PLF_SOURCES) out[s] = Number(obj[s]) || 0;
+        if (PLF_SOURCES.some(s => out[s] !== 0)) return out;
+      }
+    } catch {}
+    return Object.fromEntries(PLF_SOURCES.map(s => [s, 0])) as Record<PLFSource, number>;
+  });
+
+  const [maint, setMaint] = useState<Record<PLFSource, number>>(() => {
+    try {
+      const raw = localStorage.getItem(PLF_MAINT_KEY);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        const out = {} as Record<PLFSource, number>;
+        for (const s of PLF_SOURCES) out[s] = Number(obj[s]) ?? DEFAULT_MAINT;
+        return out;
+      }
+    } catch {}
+    return Object.fromEntries(PLF_SOURCES.map(s => [s, DEFAULT_MAINT])) as Record<PLFSource, number>;
+  });
+
+  const loadFromCsv = useCallback(async () => {
+    try {
+      const vals = await fetchLatestCapacity();
+      setCapacity(vals);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    const allZero = PLF_SOURCES.every(s => capacity[s] === 0);
+    if (allZero) loadFromCsv();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    try { localStorage.setItem(PLF_CAP_KEY, JSON.stringify(capacity)); } catch {}
+  }, [capacity]);
+
+  useEffect(() => {
+    try { localStorage.setItem(PLF_MAINT_KEY, JSON.stringify(maint)); } catch {}
+  }, [maint]);
+
+  const availCap = useMemo(() => {
+    const out = {} as Record<PLFSource, number>;
+    for (const s of PLF_SOURCES) out[s] = capacity[s] * (1 - maint[s] / 100);
+    return out;
+  }, [capacity, maint]);
+
+  const capTotal   = PLF_SOURCES.reduce((sum, s) => sum + (capacity[s] || 0), 0);
+  const availTotal = PLF_SOURCES.reduce((sum, s) => sum + availCap[s], 0);
+
+  const avgGW = useMemo(() => {
+    const out = {} as Record<PLFSource, number>;
+    for (const s of PLF_SOURCES) out[s] = kpiRow ? kpiRow[PLF_TO_AVG[s]] : 0;
+    return out;
+  }, [kpiRow]);
+
+  const avgPLF = useMemo(() => {
+    const out = {} as Record<PLFSource, number | null>;
+    for (const s of PLF_SOURCES) out[s] = availCap[s] > 0 ? (avgGW[s] / availCap[s]) * 100 : null;
+    return out;
+  }, [avgGW, availCap]);
+
+  const totalGW  = kpiRow?.total ?? null;
+  const totalPLF = totalGW != null && availTotal > 0 ? (totalGW / availTotal) * 100 : null;
+
+  const inputCls = "w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-right text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300 tabular-nums";
+  const kpiDateLabel = kpiRow?.dateLabel ?? "—";
+  const isSpotlight  = plfDate !== null && kpiRow?.dateKey !== latest?.dateKey;
+  const fmtPLF = (v: number | null) => v === null ? "—" : `${v.toFixed(1)}%`;
+
+  return (
+    <div className="mt-6 bg-white rounded-2xl shadow-sm ring-1 ring-slate-200">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 p-4">
+        <div>
+          <div className="text-sm font-semibold text-slate-800">Avg Daily PLF</div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            Plant Load Factor based on daily average generation · {kpiDateLabel}
+            {isSpotlight && <span className="ml-1 text-blue-500 font-semibold">· selected</span>}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-slate-400 whitespace-nowrap">Date</span>
+            <input
+              type="date"
+              value={plfDate ?? ""}
+              min={rows[0]?.dateKey}
+              max={latest?.dateKey}
+              onChange={e => setPlfDate(e.target.value || null)}
+              className="text-xs border border-slate-200 rounded-lg px-2 py-1 text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400 cursor-pointer"
+            />
+            {plfDate && (
+              <button
+                onClick={() => setPlfDate(null)}
+                className="text-xs text-slate-400 hover:text-slate-600 px-1"
+                title="Clear date"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+          <button
+            onClick={loadFromCsv}
+            className="text-xs text-slate-500 hover:text-slate-700 border border-slate-200 rounded-lg px-2 py-1 bg-white hover:bg-slate-50"
+          >
+            Reset to CSV defaults
+          </button>
+        </div>
+      </div>
+
+      <div className="p-4">
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="bg-slate-50">
+                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-700 w-[200px]">Metric</th>
+                {PLF_SOURCES.map(s => (
+                  <th key={s} className="px-2 py-2 text-right text-xs font-semibold text-slate-700 whitespace-nowrap">
+                    {PLF_COL_LABELS[s]}
+                  </th>
+                ))}
+                <th className="px-3 py-2 text-right text-xs font-semibold text-slate-700">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {/* Row 1: Installed Capacity */}
+              <tr className="border-t border-slate-100">
+                <td className="px-3 py-2 font-semibold text-slate-800 text-xs">Installed Capacity (GW)</td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-2 py-1.5">
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      value={capacity[s]}
+                      onChange={e => {
+                        const v = parseFloat(e.target.value) || 0;
+                        setCapacity(prev => ({ ...prev, [s]: v }));
+                      }}
+                      className={inputCls}
+                    />
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-900 text-sm">
+                  {capTotal.toFixed(0)}
+                </td>
+              </tr>
+
+              {/* Row 2: Maintenance % */}
+              <tr className="border-t border-slate-100">
+                <td className="px-3 py-2 text-xs">
+                  <div className="font-semibold text-slate-800">Maintenance (%)</div>
+                  {(() => {
+                    const firstVal = maint[PLF_SOURCES[0]];
+                    const allEqual = PLF_SOURCES.every(s => maint[s] === firstVal);
+                    const isPreset = MAINT_PRESETS.includes(firstVal);
+                    const globalVal = allEqual && isPreset ? String(firstVal) : "";
+                    const isCustom  = !allEqual || !isPreset;
+                    return (
+                      <select
+                        value={globalVal}
+                        onChange={e => {
+                          const v = parseFloat(e.target.value);
+                          if (!isNaN(v))
+                            setMaint(Object.fromEntries(PLF_SOURCES.map(s => [s, v])) as Record<PLFSource, number>);
+                        }}
+                        className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-slate-300"
+                      >
+                        {isCustom && <option value="">Custom</option>}
+                        {MAINT_PRESETS.map(v => (
+                          <option key={v} value={String(v)}>{v}% — all sources</option>
+                        ))}
+                      </select>
+                    );
+                  })()}
+                </td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-2 py-1.5">
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      max="100"
+                      value={maint[s]}
+                      onChange={e => {
+                        const v = Math.min(100, Math.max(0, parseFloat(e.target.value) || 0));
+                        setMaint(prev => ({ ...prev, [s]: v }));
+                      }}
+                      className={inputCls}
+                    />
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right text-slate-500 text-sm">—</td>
+              </tr>
+
+              {/* Row 3: Avg Daily GW */}
+              <tr className="border-t border-slate-100 bg-blue-50/40">
+                <td className="px-3 py-2 font-semibold text-slate-800 text-xs">
+                  Avg Daily GW
+                  <div className="text-[10px] font-normal text-slate-500 mt-0.5">
+                    {kpiDateLabel} · mean of 96 × 15-min intervals
+                  </div>
+                </td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-3 py-2 text-right font-mono text-sm text-slate-900 tabular-nums">
+                    {(avgGW[s] ?? 0).toFixed(2)}
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-900 text-sm">
+                  {totalGW != null ? totalGW.toFixed(2) : "—"}
+                </td>
+              </tr>
+
+              {/* Row 4: Avg Daily PLF % */}
+              <tr className="border-t border-slate-100 bg-blue-50/70">
+                <td className="px-3 py-2 font-bold text-slate-900 text-xs">Avg Daily PLF %</td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-3 py-2 text-right font-semibold tabular-nums text-sm text-slate-900">
+                    {fmtPLF(avgPLF[s])}
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right font-bold tabular-nums text-slate-900 text-sm">
+                  {fmtPLF(totalPLF)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div className="mt-3 space-y-0.5 text-[11px] text-slate-500">
+          <div>Avg Daily PLF% = Avg Daily GW ÷ (Installed Capacity × (1 − Maintenance%/100)) × 100. Capacity and maintenance values are editable and saved in your browser (shared with Demand Source tab).</div>
+          <div>Total GW = column C daily average from Grid India TimeSeries (includes net exports/imports); source columns sum may differ slightly.</div>
+          <div>* Hydro column combines Hydro and Small-Hydro installed capacity from capacity.csv; GW = combined hydro avg output.</div>
+          <div>† Others/Bio Power column = residual "Others" category (column K); values before mid-2025 show 0.0 due to PSP Excel format change.</div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ── Main component ────────────────────────────────────────────────────────────
@@ -350,6 +656,9 @@ export default function AverageDailyDemandCard() {
           values before mid-2025 show 0.0 as the column did not exist in earlier PSP Excel formats.
         </div>
       </div>
+
+      {/* PLF card */}
+      <AvgDailyPLFCard rows={rows} />
     </div>
   );
 }
