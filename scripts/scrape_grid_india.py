@@ -705,11 +705,15 @@ def _append_statewise_csv(path: str, date_str: str, states: dict, h8_total=None)
 # ── Demand Source (TimeSeries) ────────────────────────────────────────────────
 
 def _round_to_15min(time_str: str) -> str:
-    """Round a 'H:MM' or 'HH:MM' string to the nearest 15-min boundary."""
+    """Round a 'H:MM' or 'HH:MM' string to the nearest 15-min boundary.
+    Uses true nearest rounding (not floor) so e.g. 15:40 → 15:45, 23:55 → 0:00.
+    """
     try:
         h, m = map(int, time_str.split(":"))
-        rounded_m = (m // 15) * 15
-        return f"{h}:{rounded_m:02d}"
+        total_min = h * 60 + m
+        rounded = round(total_min / 15) * 15
+        rh, rm = divmod(rounded, 60)
+        return f"{rh % 24}:{rm:02d}"
     except Exception:
         return time_str
 
