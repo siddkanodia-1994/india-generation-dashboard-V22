@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   BarChart,
   Bar,
@@ -41,6 +41,58 @@ const RANGE_OPTIONS = [
   { label: "Last 6 months", days: 180 },
   { label: "All",           days: 0   },
 ] as const;
+
+// ── PLF card constants ────────────────────────────────────────────────────────
+
+type PLFSource = "Coal" | "Oil & Gas" | "Nuclear" | "Hydro" | "Solar" | "Wind" | "Bio Power";
+const PLF_SOURCES: PLFSource[] = ["Coal", "Oil & Gas", "Nuclear", "Hydro", "Solar", "Wind", "Bio Power"];
+
+const PLF_TO_DS: Record<PLFSource, Source> = {
+  "Coal":      "thermal",
+  "Oil & Gas": "gas",
+  "Nuclear":   "nuclear",
+  "Hydro":     "hydro",
+  "Solar":     "solar",
+  "Wind":      "wind",
+  "Bio Power": "others",
+};
+
+const PLF_COL_LABELS: Record<PLFSource, string> = {
+  "Coal":      "Coal",
+  "Oil & Gas": "Oil & Gas",
+  "Nuclear":   "Nuclear",
+  "Hydro":     "Hydro*",
+  "Solar":     "Solar",
+  "Wind":      "Wind",
+  "Bio Power": "Others†",
+};
+
+const PLF_CAP_KEY   = "peakDemandPLF_capacity";
+const PLF_MAINT_KEY = "peakDemandPLF_maint";
+const DEFAULT_MAINT = 5;
+
+async function fetchLatestCapacity(): Promise<Record<PLFSource, number>> {
+  const res = await fetch("/data/capacity.csv");
+  if (!res.ok) throw new Error(`capacity.csv HTTP ${res.status}`);
+  const text = await res.text();
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) throw new Error("empty capacity.csv");
+  const header = lines[0].replace(/^﻿/, "").split(",").map(h => h.trim().toLowerCase());
+  const lastRow = lines[lines.length - 1].split(",").map(c => c.trim());
+  const col = (name: string) => {
+    const idx = header.indexOf(name.toLowerCase());
+    return idx >= 0 ? parseFloat(lastRow[idx] ?? "0") || 0 : 0;
+  };
+  return {
+    "Coal":      col("coal"),
+    "Oil & Gas": col("oil & gas"),
+    "Nuclear":   col("nuclear"),
+    "Hydro":     col("hydro") + col("small-hydro"),
+    "Solar":     col("solar"),
+    "Wind":      col("wind"),
+    "Bio Power": col("bio power"),
+  };
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -350,6 +402,251 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays, spotlightDateKe
   );
 }
 
+// ── PLF Card ──────────────────────────────────────────────────────────────────
+
+function PeakDemandPLFCard({ latestRow }: { latestRow: DemandSourceRow | null }) {
+  const [capacity, setCapacity] = useState<Record<PLFSource, number>>(() => {
+    try {
+      const raw = localStorage.getItem(PLF_CAP_KEY);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        const out = Object.fromEntries(PLF_SOURCES.map(s => [s, 0])) as Record<PLFSource, number>;
+        for (const s of PLF_SOURCES) out[s] = Number(obj[s]) || 0;
+        if (PLF_SOURCES.some(s => out[s] !== 0)) return out;
+      }
+    } catch {}
+    return Object.fromEntries(PLF_SOURCES.map(s => [s, 0])) as Record<PLFSource, number>;
+  });
+
+  const [maint, setMaint] = useState<Record<PLFSource, number>>(() => {
+    try {
+      const raw = localStorage.getItem(PLF_MAINT_KEY);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        const out = {} as Record<PLFSource, number>;
+        for (const s of PLF_SOURCES) out[s] = Number(obj[s]) ?? DEFAULT_MAINT;
+        return out;
+      }
+    } catch {}
+    return Object.fromEntries(PLF_SOURCES.map(s => [s, DEFAULT_MAINT])) as Record<PLFSource, number>;
+  });
+
+  const loadFromCsv = useCallback(async () => {
+    try {
+      const vals = await fetchLatestCapacity();
+      setCapacity(vals);
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    const allZero = PLF_SOURCES.every(s => capacity[s] === 0);
+    if (allZero) loadFromCsv();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    try { localStorage.setItem(PLF_CAP_KEY, JSON.stringify(capacity)); } catch {}
+  }, [capacity]);
+
+  useEffect(() => {
+    try { localStorage.setItem(PLF_MAINT_KEY, JSON.stringify(maint)); } catch {}
+  }, [maint]);
+
+  const availCap = useMemo(() => {
+    const out = {} as Record<PLFSource, number>;
+    for (const s of PLF_SOURCES) out[s] = capacity[s] * (1 - maint[s] / 100);
+    return out;
+  }, [capacity, maint]);
+
+  const capTotal  = PLF_SOURCES.reduce((sum, s) => sum + (capacity[s] || 0), 0);
+  const availTotal = PLF_SOURCES.reduce((sum, s) => sum + availCap[s], 0);
+
+  const solarGW = useMemo(() => {
+    const out = {} as Record<PLFSource, number>;
+    for (const s of PLF_SOURCES) out[s] = latestRow?.solar[PLF_TO_DS[s]] ?? 0;
+    return out;
+  }, [latestRow]);
+
+  const nonsolarGW = useMemo(() => {
+    const out = {} as Record<PLFSource, number>;
+    for (const s of PLF_SOURCES) out[s] = latestRow?.nonsolar[PLF_TO_DS[s]] ?? 0;
+    return out;
+  }, [latestRow]);
+
+  const solarPLF = useMemo(() => {
+    const out = {} as Record<PLFSource, number | null>;
+    for (const s of PLF_SOURCES) out[s] = availCap[s] > 0 ? (solarGW[s] / availCap[s]) * 100 : null;
+    return out;
+  }, [solarGW, availCap]);
+
+  const nonsolarPLF = useMemo(() => {
+    const out = {} as Record<PLFSource, number | null>;
+    for (const s of PLF_SOURCES) out[s] = availCap[s] > 0 ? (nonsolarGW[s] / availCap[s]) * 100 : null;
+    return out;
+  }, [nonsolarGW, availCap]);
+
+  const solarDemand    = latestRow?.solar_demand_gw    ?? null;
+  const nonsolarDemand = latestRow?.nonsolar_demand_gw ?? null;
+  const solarPLFTotal    = solarDemand    != null && availTotal > 0 ? (solarDemand    / availTotal) * 100 : null;
+  const nonsolarPLFTotal = nonsolarDemand != null && availTotal > 0 ? (nonsolarDemand / availTotal) * 100 : null;
+
+  const inputCls = "w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-right text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300 tabular-nums";
+  const latestDateLabel = latestRow?.dateLabel ?? "—";
+
+  const fmtPLF = (v: number | null) => v === null ? "—" : `${v.toFixed(1)}%`;
+
+  return (
+    <div className="mt-6 bg-white rounded-2xl shadow-sm ring-1 ring-slate-200">
+      <div className="flex items-center justify-between border-b border-slate-100 p-4">
+        <div>
+          <div className="text-sm font-semibold text-slate-800">Peak Demand PLF</div>
+          <div className="text-xs text-slate-500 mt-0.5">
+            Plant Load Factor at daily peak demand timestamp · {latestDateLabel}
+          </div>
+        </div>
+        <button
+          onClick={loadFromCsv}
+          className="text-xs text-slate-500 hover:text-slate-700 border border-slate-200 rounded-lg px-2 py-1 bg-white hover:bg-slate-50"
+        >
+          Reset to CSV defaults
+        </button>
+      </div>
+
+      <div className="p-4">
+        <div className="overflow-x-auto">
+          <table className="w-full border-collapse text-sm">
+            <thead>
+              <tr className="bg-slate-50">
+                <th className="px-3 py-2 text-left text-xs font-semibold text-slate-700 w-[200px]">Metric</th>
+                {PLF_SOURCES.map(s => (
+                  <th key={s} className="px-2 py-2 text-right text-xs font-semibold text-slate-700 whitespace-nowrap">
+                    {PLF_COL_LABELS[s]}
+                  </th>
+                ))}
+                <th className="px-3 py-2 text-right text-xs font-semibold text-slate-700">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {/* Row 1: Installed Capacity */}
+              <tr className="border-t border-slate-100">
+                <td className="px-3 py-2 font-semibold text-slate-800 text-xs">Installed Capacity (GW)</td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-2 py-1.5">
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      value={capacity[s]}
+                      onChange={e => {
+                        const v = parseFloat(e.target.value) || 0;
+                        setCapacity(prev => ({ ...prev, [s]: v }));
+                      }}
+                      className={inputCls}
+                    />
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-900 text-sm">
+                  {capTotal.toFixed(0)}
+                </td>
+              </tr>
+
+              {/* Row 2: Maintenance % */}
+              <tr className="border-t border-slate-100">
+                <td className="px-3 py-2 font-semibold text-slate-800 text-xs">Maintenance (%)</td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-2 py-1.5">
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0"
+                      max="100"
+                      value={maint[s]}
+                      onChange={e => {
+                        const v = Math.min(100, Math.max(0, parseFloat(e.target.value) || 0));
+                        setMaint(prev => ({ ...prev, [s]: v }));
+                      }}
+                      className={inputCls}
+                    />
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right text-slate-500 text-sm">—</td>
+              </tr>
+
+              {/* Row 3a: Solar Hours GW */}
+              <tr className="border-t border-slate-100 bg-amber-50/40">
+                <td className="px-3 py-2 font-semibold text-slate-800 text-xs">
+                  GW at Peak — Solar Hours
+                  <div className="text-[10px] font-normal text-slate-500 mt-0.5">
+                    {latestDateLabel} · {latestRow?.solar_time ?? "—"}
+                  </div>
+                </td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-3 py-2 text-right font-mono text-sm text-slate-900 tabular-nums">
+                    {(solarGW[s] ?? 0).toFixed(2)}
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-900 text-sm">
+                  {solarDemand != null ? solarDemand.toFixed(2) : "—"}
+                </td>
+              </tr>
+
+              {/* Row 3b: Non-Solar Hours GW */}
+              <tr className="border-t border-slate-100 bg-indigo-50/40">
+                <td className="px-3 py-2 font-semibold text-slate-800 text-xs">
+                  GW at Peak — Non-Solar Hours
+                  <div className="text-[10px] font-normal text-slate-500 mt-0.5">
+                    {latestDateLabel} · {latestRow?.nonsolar_time ?? "—"}
+                  </div>
+                </td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-3 py-2 text-right font-mono text-sm text-slate-900 tabular-nums">
+                    {(nonsolarGW[s] ?? 0).toFixed(2)}
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-900 text-sm">
+                  {nonsolarDemand != null ? nonsolarDemand.toFixed(2) : "—"}
+                </td>
+              </tr>
+
+              {/* Row 4a: Solar PLF */}
+              <tr className="border-t border-slate-100 bg-amber-50/70">
+                <td className="px-3 py-2 font-bold text-slate-900 text-xs">PLF % — Solar Hours</td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-3 py-2 text-right font-semibold tabular-nums text-sm text-slate-900">
+                    {fmtPLF(solarPLF[s])}
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right font-bold tabular-nums text-slate-900 text-sm">
+                  {fmtPLF(solarPLFTotal)}
+                </td>
+              </tr>
+
+              {/* Row 4b: Non-Solar PLF */}
+              <tr className="border-t border-slate-100 bg-indigo-50/70">
+                <td className="px-3 py-2 font-bold text-slate-900 text-xs">PLF % — Non-Solar Hours</td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-3 py-2 text-right font-semibold tabular-nums text-sm text-slate-900">
+                    {fmtPLF(nonsolarPLF[s])}
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right font-bold tabular-nums text-slate-900 text-sm">
+                  {fmtPLF(nonsolarPLFTotal)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div className="mt-3 space-y-0.5 text-[11px] text-slate-500">
+          <div>PLF% = GW at Peak ÷ (Installed Capacity × (1 − Maintenance%/100)) × 100. Capacity and maintenance values are editable and saved in your browser.</div>
+          <div>* Hydro column combines Hydro and Small-Hydro installed capacity from capacity.csv; GW = combined hydro output from Grid India TimeSeries.</div>
+          <div>† Others/Bio Power column = residual "Others" category from Grid India TimeSeries, which includes Bio Power and other minor sources.</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function PeakDemandSourceCard() {
@@ -462,6 +759,9 @@ export default function PeakDemandSourceCard() {
           spotlightDateKey={selectedDate}
         />
       </div>
+
+      {/* PLF card — latest date's source GW vs available capacity */}
+      <PeakDemandPLFCard latestRow={rows.length > 0 ? rows[rows.length - 1] : null} />
     </div>
   );
 }
