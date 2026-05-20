@@ -167,9 +167,10 @@ interface PanelProps {
   rows: DemandSourceRow[];
   period: "solar" | "nonsolar";
   rangeDays: number;
+  spotlightDateKey: string | null;
 }
 
-function SourcePanel({ title, subtitle, rows, period, rangeDays }: PanelProps) {
+function SourcePanel({ title, subtitle, rows, period, rangeDays, spotlightDateKey }: PanelProps) {
   const filtered = useMemo(() => {
     if (rangeDays === 0) return rows;
     const cutoff = new Date();
@@ -179,6 +180,12 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays }: PanelProps) {
   }, [rows, rangeDays]);
 
   const latest = filtered[filtered.length - 1];
+
+  // KPI row: spotlight date if selected, otherwise latest in range
+  const kpiRow = useMemo(() => {
+    if (!spotlightDateKey) return latest;
+    return rows.find(r => r.dateKey === spotlightDateKey) ?? latest;
+  }, [spotlightDateKey, rows, latest]);
 
   const chartData = filtered.map(r => ({
     label: fmtXLabel(r.dateKey),
@@ -191,11 +198,11 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays }: PanelProps) {
 
   // Official peak demand met (from Peak Demand Solar-NonSolar.csv)
   // Sources sum to Total Generation which includes net exports → slightly > Demand Met
-  const officialLatest = latest
-    ? (period === "solar" ? latest.solar_demand_gw : latest.nonsolar_demand_gw)
+  const officialLatest = kpiRow
+    ? (period === "solar" ? kpiRow.solar_demand_gw : kpiRow.nonsolar_demand_gw)
     : null;
-  const genLatest = latest
-    ? SOURCES.reduce((sum, s) => sum + (latest[period][s] ?? 0), 0)
+  const genLatest = kpiRow
+    ? SOURCES.reduce((sum, s) => sum + (kpiRow[period][s] ?? 0), 0)
     : 0;
   // Use official demand met for display; fall back to generation sum if unavailable
   const totalLatest = officialLatest ?? genLatest;
@@ -239,16 +246,21 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays }: PanelProps) {
           <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>
         </div>
 
-        {/* Latest day KPIs */}
-        {latest && (
+        {/* KPI badges — shows spotlight date if selected, otherwise latest in range */}
+        {kpiRow && (
           <div className="mb-4 mt-3">
-            <div className="text-xs text-gray-500 mb-2 font-medium uppercase tracking-wide">
-              {latest.dateLabel} — Peak @ {period === "solar" ? latest.solar_time : latest.nonsolar_time}
-              {" "}· Demand Met {totalLatest.toFixed(2)} GW
+            <div className="text-xs text-gray-500 mb-2 font-medium uppercase tracking-wide flex items-center gap-2">
+              <span>
+                {kpiRow.dateLabel} — Peak @ {period === "solar" ? kpiRow.solar_time : kpiRow.nonsolar_time}
+                {" "}· Demand Met {totalLatest.toFixed(2)} GW
+              </span>
+              {spotlightDateKey && kpiRow.dateKey !== latest?.dateKey && (
+                <span className="text-blue-500 font-semibold normal-case">· selected</span>
+              )}
             </div>
             <div className="flex flex-wrap gap-2">
               {SOURCES.map(s => {
-                const val = latest[period][s];
+                const val = kpiRow[period][s];
                 const pct = totalLatest > 0 ? (val / totalLatest * 100).toFixed(1) : "0.0";
                 return (
                   <div
@@ -344,7 +356,8 @@ export default function PeakDemandSourceCard() {
   const [rows, setRows] = useState<DemandSourceRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [rangeDays, setRangeDays] = useState<number>(90);
+  const [rangeDays, setRangeDays] = useState<number>(30);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
   useEffect(() => {
     Promise.all([
@@ -380,7 +393,7 @@ export default function PeakDemandSourceCard() {
 
   return (
     <div className="mt-4">
-      {/* Header + range selector */}
+      {/* Header + controls */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
         <div>
           <h2 className="text-lg font-bold text-gray-800">Peak Demand — Source Breakdown</h2>
@@ -388,20 +401,45 @@ export default function PeakDemandSourceCard() {
             MW source mix at the daily peak demand timestamp · Solar &amp; Non-Solar hours · converted to GW
           </p>
         </div>
-        <div className="flex gap-1.5 flex-wrap">
-          {RANGE_OPTIONS.map(opt => (
-            <button
-              key={opt.days}
-              onClick={() => setRangeDays(opt.days)}
-              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                rangeDays === opt.days
-                  ? "bg-blue-600 text-white"
-                  : "bg-white text-gray-600 border border-gray-200 hover:bg-gray-50"
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Range buttons */}
+          <div className="flex gap-1.5 flex-wrap">
+            {RANGE_OPTIONS.map(opt => (
+              <button
+                key={opt.days}
+                onClick={() => setRangeDays(opt.days)}
+                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                  rangeDays === opt.days
+                    ? "bg-blue-600 text-white"
+                    : "bg-white text-gray-600 border border-gray-200 hover:bg-gray-50"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Date picker */}
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-gray-400 whitespace-nowrap">Jump to</span>
+            <input
+              type="date"
+              value={selectedDate ?? ""}
+              min={rows[0]?.dateKey}
+              max={rows[rows.length - 1]?.dateKey}
+              onChange={e => setSelectedDate(e.target.value || null)}
+              className="text-xs border border-gray-200 rounded-lg px-2 py-1 text-gray-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400 cursor-pointer"
+            />
+            {selectedDate && (
+              <button
+                onClick={() => setSelectedDate(null)}
+                className="text-xs text-gray-400 hover:text-gray-600 px-1"
+                title="Clear date"
+              >
+                ✕
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -413,6 +451,7 @@ export default function PeakDemandSourceCard() {
           rows={rows}
           period="solar"
           rangeDays={rangeDays}
+          spotlightDateKey={selectedDate}
         />
         <SourcePanel
           title="Non-Solar Hours Peak"
@@ -420,6 +459,7 @@ export default function PeakDemandSourceCard() {
           rows={rows}
           period="nonsolar"
           rangeDays={rangeDays}
+          spotlightDateKey={selectedDate}
         />
       </div>
     </div>
