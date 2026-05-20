@@ -52,6 +52,10 @@ interface DemandSourceRow {
   nonsolar_time: string;
   solar: Record<Source, number>;
   nonsolar: Record<Source, number>;
+  // Official peak demand met from Peak Demand Solar-NonSolar.csv
+  // Sources sum to Total Generation (includes exports); these are Demand Met
+  solar_demand_gw: number | null;
+  nonsolar_demand_gw: number | null;
 }
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
@@ -79,7 +83,31 @@ function fmtXLabel(key: string): string {
 
 // ── CSV parsing ───────────────────────────────────────────────────────────────
 
-function parseCsv(text: string): DemandSourceRow[] {
+/** Parse Peak Demand Solar-NonSolar.csv → {dateKey: {solar_gw, nonsolar_gw}} */
+function parsePeakDemandMap(text: string): Map<string, { solar: number; nonsolar: number }> {
+  const map = new Map<string, { solar: number; nonsolar: number }>();
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return map;
+  const header = lines[0].split(",").map(h => h.trim());
+  const solarIdx    = header.indexOf("solar_gw");
+  const nonsolarIdx = header.indexOf("nonsolar_gw");
+  if (solarIdx < 0 || nonsolarIdx < 0) return map;
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",").map(c => c.trim());
+    const dateKey = parseDateKey(cols[0] ?? "");
+    if (!dateKey) continue;
+    const solar    = parseFloat(cols[solarIdx]    ?? "") || 0;
+    const nonsolar = parseFloat(cols[nonsolarIdx] ?? "") || 0;
+    // keep last row per date (deduplicates any stale duplicates in the CSV)
+    map.set(dateKey, { solar, nonsolar });
+  }
+  return map;
+}
+
+function parseCsv(
+  text: string,
+  peakMap: Map<string, { solar: number; nonsolar: number }>,
+): DemandSourceRow[] {
   const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
   if (lines.length < 2) return [];
 
@@ -97,6 +125,7 @@ function parseCsv(text: string): DemandSourceRow[] {
     if (!dateKey) continue;
 
     const num = (k: string) => parseFloat(obj[k] ?? "0") || 0;
+    const peak = peakMap.get(dateKey);
 
     rows.push({
       dateKey,
@@ -122,6 +151,8 @@ function parseCsv(text: string): DemandSourceRow[] {
         thermal: num("nonsolar_thermal_gw"),
         others:  num("nonsolar_others_gw"),
       },
+      solar_demand_gw:    peak?.solar    ?? null,
+      nonsolar_demand_gw: peak?.nonsolar ?? null,
     });
   }
 
@@ -158,13 +189,23 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays }: PanelProps) {
     ),
   }));
 
-  const totalLatest = latest
+  // Official peak demand met (from Peak Demand Solar-NonSolar.csv)
+  // Sources sum to Total Generation which includes net exports → slightly > Demand Met
+  const officialLatest = latest
+    ? (period === "solar" ? latest.solar_demand_gw : latest.nonsolar_demand_gw)
+    : null;
+  const genLatest = latest
     ? SOURCES.reduce((sum, s) => sum + (latest[period][s] ?? 0), 0)
     : 0;
+  // Use official demand met for display; fall back to generation sum if unavailable
+  const totalLatest = officialLatest ?? genLatest;
 
   const customTooltip = ({ active, payload, label }: any) => {
     if (!active || !payload?.length) return null;
-    const total = payload.reduce((s: number, p: any) => s + (p.value ?? 0), 0);
+    const genTotal = payload.reduce((s: number, p: any) => s + (p.value ?? 0), 0);
+    // Find the row for this bar to get official demand
+    const row = filtered.find(r => fmtXLabel(r.dateKey) === label);
+    const official = row ? (period === "solar" ? row.solar_demand_gw : row.nonsolar_demand_gw) : null;
     return (
       <div className="bg-white border border-gray-200 rounded shadow-lg p-3 text-xs">
         <div className="font-semibold text-gray-700 mb-1">{label}</div>
@@ -174,9 +215,17 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays }: PanelProps) {
             <span className="font-mono">{p.value?.toFixed(2)} GW</span>
           </div>
         ))}
-        <div className="border-t border-gray-200 mt-1 pt-1 flex justify-between font-semibold">
-          <span>Total</span>
-          <span className="font-mono">{total.toFixed(2)} GW</span>
+        <div className="border-t border-gray-200 mt-1 pt-1 space-y-0.5">
+          <div className="flex justify-between font-semibold">
+            <span>Demand Met</span>
+            <span className="font-mono">{official != null ? official.toFixed(2) : "—"} GW</span>
+          </div>
+          {official != null && (
+            <div className="flex justify-between text-gray-400">
+              <span>Incl. exports</span>
+              <span className="font-mono">{genTotal.toFixed(2)} GW</span>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -195,7 +244,7 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays }: PanelProps) {
           <div className="mb-4 mt-3">
             <div className="text-xs text-gray-500 mb-2 font-medium uppercase tracking-wide">
               {latest.dateLabel} — Peak @ {period === "solar" ? latest.solar_time : latest.nonsolar_time}
-              {" "}· Total {totalLatest.toFixed(2)} GW
+              {" "}· Demand Met {totalLatest.toFixed(2)} GW
             </div>
             <div className="flex flex-wrap gap-2">
               {SOURCES.map(s => {
@@ -257,12 +306,13 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays }: PanelProps) {
                     {SOURCE_LABELS[s]}
                   </th>
                 ))}
-                <th className="text-right py-1.5 px-1 text-gray-500 font-medium">Total</th>
+                <th className="text-right py-1.5 px-1 text-gray-500 font-medium">Demand Met</th>
               </tr>
             </thead>
             <tbody>
               {filtered.slice(-10).reverse().map(r => {
-                const total = SOURCES.reduce((s, src) => s + (r[period][src] ?? 0), 0);
+                const official = period === "solar" ? r.solar_demand_gw : r.nonsolar_demand_gw;
+                const fallback = SOURCES.reduce((s, src) => s + (r[period][src] ?? 0), 0);
                 return (
                   <tr key={r.dateKey} className="border-b border-gray-50 hover:bg-gray-50">
                     <td className="py-1.5 px-1 text-gray-700 font-medium">{r.dateLabel}</td>
@@ -275,7 +325,7 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays }: PanelProps) {
                       </td>
                     ))}
                     <td className="py-1.5 px-1 text-right font-mono font-semibold text-gray-800">
-                      {total.toFixed(2)}
+                      {(official ?? fallback).toFixed(2)}
                     </td>
                   </tr>
                 );
@@ -297,13 +347,13 @@ export default function PeakDemandSourceCard() {
   const [rangeDays, setRangeDays] = useState<number>(90);
 
   useEffect(() => {
-    fetch("/data/demand_source.csv")
-      .then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.text();
-      })
-      .then(text => {
-        setRows(parseCsv(text));
+    Promise.all([
+      fetch("/data/demand_source.csv").then(r => { if (!r.ok) throw new Error(`demand_source HTTP ${r.status}`); return r.text(); }),
+      fetch("/data/Peak Demand Solar-NonSolar.csv").then(r => { if (!r.ok) throw new Error(`peak demand HTTP ${r.status}`); return r.text(); }),
+    ])
+      .then(([srcText, peakText]) => {
+        const peakMap = parsePeakDemandMap(peakText);
+        setRows(parseCsv(srcText, peakMap));
         setLoading(false);
       })
       .catch(e => {
