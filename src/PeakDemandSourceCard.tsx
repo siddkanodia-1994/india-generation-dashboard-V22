@@ -1,0 +1,377 @@
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from "recharts";
+
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const SOURCES = ["thermal", "solar", "wind", "hydro", "nuclear", "gas", "others"] as const;
+type Source = typeof SOURCES[number];
+
+const SOURCE_LABELS: Record<Source, string> = {
+  thermal: "Thermal",
+  solar:   "Solar",
+  wind:    "Wind",
+  hydro:   "Hydro",
+  nuclear: "Nuclear",
+  gas:     "Gas",
+  others:  "Others",
+};
+
+const SOURCE_COLORS: Record<Source, string> = {
+  thermal: "#b45309",
+  solar:   "#ca8a04",
+  wind:    "#0891b2",
+  hydro:   "#0369a1",
+  nuclear: "#7c3aed",
+  gas:     "#ea580c",
+  others:  "#64748b",
+};
+
+const RANGE_OPTIONS = [
+  { label: "Last 30 days",  days: 30  },
+  { label: "Last 90 days",  days: 90  },
+  { label: "Last 6 months", days: 180 },
+  { label: "All",           days: 0   },
+] as const;
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+interface DemandSourceRow {
+  dateKey: string;      // YYYY-MM-DD (sortable)
+  dateLabel: string;    // DD Mon YY (display)
+  rawDate: string;      // original CSV date string
+  solar_time: string;
+  nonsolar_time: string;
+  solar: Record<Source, number>;
+  nonsolar: Record<Source, number>;
+}
+
+// ── Date helpers ──────────────────────────────────────────────────────────────
+
+function parseDateKey(raw: string): string | null {
+  const parts = raw.trim().split("/");
+  if (parts.length !== 3) return null;
+  const [d, m, y] = parts.map(Number);
+  if (!d || !m || !y) return null;
+  const year = y < 100 ? 2000 + y : y;
+  return `${year}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+
+function fmtDateLabel(key: string): string {
+  const [y, m, d] = key.split("-");
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${d} ${months[parseInt(m, 10) - 1]} ${String(parseInt(y, 10)).slice(2)}`;
+}
+
+function fmtXLabel(key: string): string {
+  const [, m, d] = key.split("-");
+  const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  return `${d} ${months[parseInt(m, 10) - 1]}`;
+}
+
+// ── CSV parsing ───────────────────────────────────────────────────────────────
+
+function parseCsv(text: string): DemandSourceRow[] {
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return [];
+
+  const header = lines[0].split(",").map(h => h.trim());
+  const rows: DemandSourceRow[] = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",").map(c => c.trim());
+    if (cols.length < 17) continue;
+    const obj: Record<string, string> = {};
+    header.forEach((h, idx) => { obj[h] = cols[idx] ?? ""; });
+
+    const rawDate = obj["date"] ?? "";
+    const dateKey = parseDateKey(rawDate);
+    if (!dateKey) continue;
+
+    const num = (k: string) => parseFloat(obj[k] ?? "0") || 0;
+
+    rows.push({
+      dateKey,
+      dateLabel: fmtDateLabel(dateKey),
+      rawDate,
+      solar_time:    obj["solar_time"]    ?? "",
+      nonsolar_time: obj["nonsolar_time"] ?? "",
+      solar: {
+        nuclear: num("solar_nuclear_gw"),
+        wind:    num("solar_wind_gw"),
+        solar:   num("solar_solar_gw"),
+        hydro:   num("solar_hydro_gw"),
+        gas:     num("solar_gas_gw"),
+        thermal: num("solar_thermal_gw"),
+        others:  num("solar_others_gw"),
+      },
+      nonsolar: {
+        nuclear: num("nonsolar_nuclear_gw"),
+        wind:    num("nonsolar_wind_gw"),
+        solar:   num("nonsolar_solar_gw"),
+        hydro:   num("nonsolar_hydro_gw"),
+        gas:     num("nonsolar_gas_gw"),
+        thermal: num("nonsolar_thermal_gw"),
+        others:  num("nonsolar_others_gw"),
+      },
+    });
+  }
+
+  return rows.sort((a, b) => a.dateKey.localeCompare(b.dateKey));
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+interface PanelProps {
+  title: string;
+  subtitle: string;
+  rows: DemandSourceRow[];
+  period: "solar" | "nonsolar";
+  rangeDays: number;
+}
+
+function SourcePanel({ title, subtitle, rows, period, rangeDays }: PanelProps) {
+  const filtered = useMemo(() => {
+    if (rangeDays === 0) return rows;
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - rangeDays);
+    const cutoffKey = cutoff.toISOString().slice(0, 10);
+    return rows.filter(r => r.dateKey >= cutoffKey);
+  }, [rows, rangeDays]);
+
+  const latest = filtered[filtered.length - 1];
+
+  const chartData = filtered.map(r => ({
+    label: fmtXLabel(r.dateKey),
+    dateKey: r.dateKey,
+    time: period === "solar" ? r.solar_time : r.nonsolar_time,
+    ...Object.fromEntries(
+      SOURCES.map(s => [s, r[period][s]])
+    ),
+  }));
+
+  const totalLatest = latest
+    ? SOURCES.reduce((sum, s) => sum + (latest[period][s] ?? 0), 0)
+    : 0;
+
+  const customTooltip = ({ active, payload, label }: any) => {
+    if (!active || !payload?.length) return null;
+    const total = payload.reduce((s: number, p: any) => s + (p.value ?? 0), 0);
+    return (
+      <div className="bg-white border border-gray-200 rounded shadow-lg p-3 text-xs">
+        <div className="font-semibold text-gray-700 mb-1">{label}</div>
+        {payload.slice().reverse().map((p: any) => (
+          <div key={p.dataKey} className="flex justify-between gap-4">
+            <span style={{ color: p.color }}>{SOURCE_LABELS[p.dataKey as Source]}</span>
+            <span className="font-mono">{p.value?.toFixed(2)} GW</span>
+          </div>
+        ))}
+        <div className="border-t border-gray-200 mt-1 pt-1 flex justify-between font-semibold">
+          <span>Total</span>
+          <span className="font-mono">{total.toFixed(2)} GW</span>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="flex-1 min-w-0">
+      <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-5">
+        <div className="mb-1">
+          <h3 className="text-base font-bold text-gray-800">{title}</h3>
+          <p className="text-xs text-gray-500 mt-0.5">{subtitle}</p>
+        </div>
+
+        {/* Latest day KPIs */}
+        {latest && (
+          <div className="mb-4 mt-3">
+            <div className="text-xs text-gray-500 mb-2 font-medium uppercase tracking-wide">
+              {latest.dateLabel} — Peak @ {period === "solar" ? latest.solar_time : latest.nonsolar_time}
+              {" "}· Total {totalLatest.toFixed(2)} GW
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {SOURCES.map(s => {
+                const val = latest[period][s];
+                const pct = totalLatest > 0 ? (val / totalLatest * 100).toFixed(1) : "0.0";
+                return (
+                  <div
+                    key={s}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-white text-xs font-semibold"
+                    style={{ backgroundColor: SOURCE_COLORS[s] }}
+                  >
+                    <span>{SOURCE_LABELS[s]}</span>
+                    <span className="opacity-90">{val.toFixed(2)} GW</span>
+                    <span className="opacity-75">({pct}%)</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Stacked bar chart */}
+        <div style={{ height: 300 }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }} barSize={rangeDays <= 30 ? 14 : rangeDays <= 90 ? 6 : 3}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis
+                dataKey="label"
+                tick={{ fontSize: 10, fill: "#6b7280" }}
+                interval="preserveStartEnd"
+              />
+              <YAxis
+                tick={{ fontSize: 10, fill: "#6b7280" }}
+                tickFormatter={v => `${v}`}
+                label={{ value: "GW", angle: -90, position: "insideLeft", fontSize: 10, fill: "#9ca3af", dy: 20 }}
+                width={36}
+              />
+              <Tooltip content={customTooltip} />
+              <Legend
+                formatter={(v) => <span style={{ fontSize: 11, color: "#374151" }}>{SOURCE_LABELS[v as Source]}</span>}
+                wrapperStyle={{ paddingTop: 8 }}
+              />
+              {SOURCES.map(s => (
+                <Bar key={s} dataKey={s} stackId="a" fill={SOURCE_COLORS[s]} name={s} />
+              ))}
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        {/* Recent table */}
+        <div className="mt-4 overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-gray-100">
+                <th className="text-left py-1.5 px-1 text-gray-500 font-medium">Date</th>
+                <th className="text-right py-1.5 px-1 text-gray-500 font-medium">Time</th>
+                {SOURCES.map(s => (
+                  <th key={s} className="text-right py-1.5 px-1 font-medium" style={{ color: SOURCE_COLORS[s] }}>
+                    {SOURCE_LABELS[s]}
+                  </th>
+                ))}
+                <th className="text-right py-1.5 px-1 text-gray-500 font-medium">Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.slice(-10).reverse().map(r => {
+                const total = SOURCES.reduce((s, src) => s + (r[period][src] ?? 0), 0);
+                return (
+                  <tr key={r.dateKey} className="border-b border-gray-50 hover:bg-gray-50">
+                    <td className="py-1.5 px-1 text-gray-700 font-medium">{r.dateLabel}</td>
+                    <td className="py-1.5 px-1 text-right text-gray-500 font-mono">
+                      {period === "solar" ? r.solar_time : r.nonsolar_time}
+                    </td>
+                    {SOURCES.map(s => (
+                      <td key={s} className="py-1.5 px-1 text-right font-mono text-gray-700">
+                        {r[period][s].toFixed(2)}
+                      </td>
+                    ))}
+                    <td className="py-1.5 px-1 text-right font-mono font-semibold text-gray-800">
+                      {total.toFixed(2)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+
+export default function PeakDemandSourceCard() {
+  const [rows, setRows] = useState<DemandSourceRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [rangeDays, setRangeDays] = useState<number>(90);
+
+  useEffect(() => {
+    fetch("/data/demand_source.csv")
+      .then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.text();
+      })
+      .then(text => {
+        setRows(parseCsv(text));
+        setLoading(false);
+      })
+      .catch(e => {
+        setError(e.message);
+        setLoading(false);
+      });
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-40 text-gray-500 text-sm">
+        Loading demand source data…
+      </div>
+    );
+  }
+
+  if (error || rows.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-40 text-gray-400 text-sm">
+        {error ? `Error: ${error}` : "No data available yet."}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-4">
+      {/* Header + range selector */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-lg font-bold text-gray-800">Peak Demand — Source Breakdown</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            MW source mix at the daily peak demand timestamp · Solar &amp; Non-Solar hours · converted to GW
+          </p>
+        </div>
+        <div className="flex gap-1.5 flex-wrap">
+          {RANGE_OPTIONS.map(opt => (
+            <button
+              key={opt.days}
+              onClick={() => setRangeDays(opt.days)}
+              className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+                rangeDays === opt.days
+                  ? "bg-blue-600 text-white"
+                  : "bg-white text-gray-600 border border-gray-200 hover:bg-gray-50"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Two panels side by side */}
+      <div className="flex flex-col lg:flex-row gap-4">
+        <SourcePanel
+          title="Solar Hours Peak"
+          subtitle="Source mix at the peak demand timestamp during daytime (solar hours)"
+          rows={rows}
+          period="solar"
+          rangeDays={rangeDays}
+        />
+        <SourcePanel
+          title="Non-Solar Hours Peak"
+          subtitle="Source mix at the peak demand timestamp during evening/night (non-solar hours)"
+          rows={rows}
+          period="nonsolar"
+          rangeDays={rangeDays}
+        />
+      </div>
+    </div>
+  );
+}

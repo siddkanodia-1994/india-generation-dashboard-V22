@@ -7,6 +7,7 @@ import RatedCapacity from "./RatedCapacity";
 import LatestNews from "./LatestNews";
 import SummaryCard from "./SummaryCard";
 import StatewiseDemandCard from "./StatewiseDemandCard";
+import PeakDemandSourceCard from "./PeakDemandSourceCard";
 
 export default function App() {
   return (
@@ -126,6 +127,7 @@ export default function App() {
                   <Tab>Peak Demand Met</Tab>
                   <Tab>Solar Hours</Tab>
                   <Tab>Non-Solar Hours</Tab>
+                  <Tab>Demand Source</Tab>
                 </TabList>
               </div>
 
@@ -192,6 +194,11 @@ export default function App() {
                   }}
                   extraBadgeCols={[{ key: "nonsolar_time", label: "Peak Time", isText: true }]}
                 />
+              </TabPanel>
+
+              {/* Demand Source breakdown */}
+              <TabPanel>
+                <PeakDemandSourceCard />
               </TabPanel>
             </Tabs>
           </TabPanel>

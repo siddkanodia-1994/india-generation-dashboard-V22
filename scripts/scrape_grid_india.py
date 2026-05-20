@@ -702,6 +702,112 @@ def _append_statewise_csv(path: str, date_str: str, states: dict, h8_total=None)
         _csv.writer(f).writerow(row_vals)
 
 
+# ── Demand Source (TimeSeries) ────────────────────────────────────────────────
+
+def _round_to_15min(time_str: str) -> str:
+    """Round a 'H:MM' or 'HH:MM' string to the nearest 15-min boundary."""
+    try:
+        h, m = map(int, time_str.split(":"))
+        rounded_m = (m // 15) * 15
+        return f"{h}:{rounded_m:02d}"
+    except Exception:
+        return time_str
+
+
+def _parse_time_series(ws: "_SheetAdapter") -> dict:
+    """
+    Read the TimeSeries sheet (96 rows of 15-min data).
+    Returns {time_str: {source: mw_value}} for each row.
+    Data rows start at row 5 (1-based); headers are rows 1-4.
+    Column layout (1-based): TIME=1, NUCLEAR=4, WIND=5, SOLAR=6, HYDRO=7, GAS=8, THERMAL=9, OTHERS=10
+    """
+    SOURCE_COLS = {
+        "nuclear": 4, "wind": 5, "solar": 6,
+        "hydro": 7, "gas": 8, "thermal": 9, "others": 10,
+    }
+    ts = {}
+    for r in range(5, ws.max_row + 1):
+        raw_val = ws.cell(row=r, column=1).value
+        if raw_val is None:
+            continue
+        time_str = _excel_time_to_str(raw_val) if not isinstance(raw_val, str) else str(raw_val).strip()
+        if not time_str or time_str.lower() in ("time", ""):
+            continue
+        sources = {}
+        for src, col in SOURCE_COLS.items():
+            cell_val = ws.cell(row=r, column=col).value
+            try:
+                sources[src] = float(cell_val) if cell_val is not None else 0.0
+            except (ValueError, TypeError):
+                sources[src] = 0.0
+        ts[time_str] = sources
+    return ts
+
+
+_DS_HEADER = [
+    "date",
+    "solar_time",
+    "solar_nuclear_gw", "solar_wind_gw", "solar_solar_gw", "solar_hydro_gw",
+    "solar_gas_gw", "solar_thermal_gw", "solar_others_gw",
+    "nonsolar_time",
+    "nonsolar_nuclear_gw", "nonsolar_wind_gw", "nonsolar_solar_gw", "nonsolar_hydro_gw",
+    "nonsolar_gas_gw", "nonsolar_thermal_gw", "nonsolar_others_gw",
+]
+
+
+def _write_demand_source_csv(
+    target_date: "date",
+    solar_time: str,
+    nonsolar_time: str,
+    ts_data: dict,
+) -> bool:
+    csv_path = CSV_PATHS["demand_source"]
+    date_str = _format_date(target_date)
+
+    p = Path(csv_path)
+    if p.exists():
+        with open(p, newline="") as f:
+            for row in csv.reader(f):
+                if row and row[0].strip() == date_str:
+                    print(f"[GRID-SRC] {date_str} already in demand_source.csv — skipping.")
+                    return True
+
+    def _gw(src_dict, key):
+        return round(src_dict.get(key, 0.0) / 1000, 2)
+
+    solar_key    = _round_to_15min(solar_time)    if solar_time    else ""
+    nonsolar_key = _round_to_15min(nonsolar_time) if nonsolar_time else ""
+
+    solar_src    = ts_data.get(solar_key, {})
+    nonsolar_src = ts_data.get(nonsolar_key, {})
+
+    if solar_key and not solar_src:
+        print(f"[GRID-SRC] WARNING: No TimeSeries row for solar_key={solar_key!r}; available={sorted(ts_data)[:5]}")
+    if nonsolar_key and not nonsolar_src:
+        print(f"[GRID-SRC] WARNING: No TimeSeries row for nonsolar_key={nonsolar_key!r}")
+
+    row = [
+        date_str, solar_time,
+        _gw(solar_src, "nuclear"), _gw(solar_src, "wind"), _gw(solar_src, "solar"),
+        _gw(solar_src, "hydro"), _gw(solar_src, "gas"), _gw(solar_src, "thermal"),
+        _gw(solar_src, "others"),
+        nonsolar_time,
+        _gw(nonsolar_src, "nuclear"), _gw(nonsolar_src, "wind"), _gw(nonsolar_src, "solar"),
+        _gw(nonsolar_src, "hydro"), _gw(nonsolar_src, "gas"), _gw(nonsolar_src, "thermal"),
+        _gw(nonsolar_src, "others"),
+    ]
+
+    write_header = not p.exists() or p.stat().st_size == 0
+    with open(csv_path, "a", newline="") as f:
+        w = csv.writer(f)
+        if write_header:
+            w.writerow(_DS_HEADER)
+        w.writerow(row)
+
+    print(f"[GRID-SRC] Wrote demand source for {date_str}: solar@{solar_key}, nonsolar@{nonsolar_key}")
+    return True
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def scrape_grid_india(target_date=None, excel_url=None, force=False) -> bool:
@@ -718,10 +824,13 @@ def scrape_grid_india(target_date=None, excel_url=None, force=False) -> bool:
         # Idempotency: check supply.csv as representative; all CSVs are written together
         last = _last_date_in_csv(CSV_PATHS["supply"])
         if last and last >= target_date:
-            # Also check solar-nonsolar and statewise separately (may lag if newly added)
+            # Also check solar-nonsolar, statewise, and demand_source separately (may lag if newly added)
             last_sn = _last_date_in_csv(CSV_PATHS["demand_solar_nonsolar"])
             last_sw = _last_date_in_csv(CSV_PATHS["statewise_demand"])
-            if last_sn and last_sn >= target_date and last_sw and last_sw >= target_date:
+            last_ds = _last_date_in_csv(CSV_PATHS["demand_source"])
+            if (last_sn and last_sn >= target_date
+                    and last_sw and last_sw >= target_date
+                    and last_ds and last_ds >= target_date):
                 print(f"[GRID] Data for {target_date} already present in all CSVs. Skipping.")
                 return True
             # Supply already written but some CSVs missing — proceed to (re-)extract
@@ -811,6 +920,20 @@ def scrape_grid_india(target_date=None, excel_url=None, force=False) -> bool:
             print(f"[GRID-STATE] Statewise data for {target_date} already present. Skipping.")
     else:
         print("[GRID-STATE] WARNING: No statewise data extracted — skipping statewise CSV.")
+
+    # Write demand_source.csv from TimeSeries sheet
+    solar_time    = data.get("solar_peak_time", "")
+    nonsolar_time = data.get("nonsolar_peak_time", "")
+    if solar_time or nonsolar_time:
+        ts_ws = _open_sheet(excel_bytes, "TimeSeries")
+        if ts_ws is not None:
+            ts_data = _parse_time_series(ts_ws)
+            _write_demand_source_csv(target_date, solar_time, nonsolar_time, ts_data)
+            wrote_any = True
+        else:
+            print("[GRID-SRC] WARNING: Could not open TimeSeries sheet — skipping demand_source.csv.")
+    else:
+        print("[GRID-SRC] WARNING: No solar/nonsolar peak times — skipping demand_source.csv.")
 
     if wrote_any:
         print(f"[GRID] Done for {target_date}.")
