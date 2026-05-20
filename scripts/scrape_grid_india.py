@@ -723,11 +723,12 @@ def _parse_time_series(ws: "_SheetAdapter") -> dict:
     Read the TimeSeries sheet (96 rows of 15-min data).
     Returns {time_str: {source: mw_value}} for each row.
     Data rows start at row 5 (1-based); headers are rows 1-4.
-    Column layout (1-based): TIME=1, NUCLEAR=4, WIND=5, SOLAR=6, HYDRO=7, GAS=8, THERMAL=9, OTHERS=10
+    Column layout (1-based): TIME=1, TOTAL=3, NUCLEAR=4, WIND=5, SOLAR=6,
+    HYDRO=7, GAS=8, THERMAL=9, STORAGE=10 (PSP+BESS), OTHERS=11
     """
     SOURCE_COLS = {
         "nuclear": 4, "wind": 5, "solar": 6,
-        "hydro": 7, "gas": 8, "thermal": 9, "others": 10,
+        "hydro": 7, "gas": 8, "thermal": 9, "storage": 10, "others": 11,
     }
     ts = {}
     for r in range(5, ws.max_row + 1):
@@ -741,7 +742,12 @@ def _parse_time_series(ws: "_SheetAdapter") -> dict:
         for src, col in SOURCE_COLS.items():
             cell_val = ws.cell(row=r, column=col).value
             try:
-                sources[src] = float(cell_val) if cell_val is not None else 0.0
+                val = float(cell_val) if cell_val is not None else 0.0
+                # Col 11 (Others) was used for total demand in pre-2026 PSP Excel formats.
+                # Cap at 20 GW (20000 MW) to guard against the format-change boundary.
+                if src == "others" and val > 20000:
+                    val = 0.0
+                sources[src] = val
             except (ValueError, TypeError):
                 sources[src] = 0.0
         ts[time_str] = sources
@@ -752,10 +758,10 @@ _DS_HEADER = [
     "date",
     "solar_time",
     "solar_nuclear_gw", "solar_wind_gw", "solar_solar_gw", "solar_hydro_gw",
-    "solar_gas_gw", "solar_thermal_gw", "solar_others_gw",
+    "solar_gas_gw", "solar_thermal_gw", "solar_storage_gw", "solar_others_gw",
     "nonsolar_time",
     "nonsolar_nuclear_gw", "nonsolar_wind_gw", "nonsolar_solar_gw", "nonsolar_hydro_gw",
-    "nonsolar_gas_gw", "nonsolar_thermal_gw", "nonsolar_others_gw",
+    "nonsolar_gas_gw", "nonsolar_thermal_gw", "nonsolar_storage_gw", "nonsolar_others_gw",
 ]
 
 
@@ -794,11 +800,11 @@ def _write_demand_source_csv(
         date_str, solar_time,
         _gw(solar_src, "nuclear"), _gw(solar_src, "wind"), _gw(solar_src, "solar"),
         _gw(solar_src, "hydro"), _gw(solar_src, "gas"), _gw(solar_src, "thermal"),
-        _gw(solar_src, "others"),
+        _gw(solar_src, "storage"), _gw(solar_src, "others"),
         nonsolar_time,
         _gw(nonsolar_src, "nuclear"), _gw(nonsolar_src, "wind"), _gw(nonsolar_src, "solar"),
         _gw(nonsolar_src, "hydro"), _gw(nonsolar_src, "gas"), _gw(nonsolar_src, "thermal"),
-        _gw(nonsolar_src, "others"),
+        _gw(nonsolar_src, "storage"), _gw(nonsolar_src, "others"),
     ]
 
     write_header = not p.exists() or p.stat().st_size == 0
@@ -809,6 +815,81 @@ def _write_demand_source_csv(
         w.writerow(row)
 
     print(f"[GRID-SRC] Wrote demand source for {date_str}: solar@{solar_key}, nonsolar@{nonsolar_key}")
+    return True
+
+
+# ── Average Daily Demand (TimeSeries daily averages) ─────────────────────────
+
+def _compute_daily_averages(ws: "_SheetAdapter") -> dict:
+    """
+    Average all 96 15-min rows in the TimeSeries sheet.
+    Returns {key: avg_gw} for total + 8 sources.
+    Column layout (1-based): TOTAL=3, NUCLEAR=4, WIND=5, SOLAR=6,
+    HYDRO=7, GAS=8, THERMAL=9, STORAGE=10, OTHERS=11
+    """
+    COLS = {
+        "total": 3, "nuclear": 4, "wind": 5, "solar": 6,
+        "hydro": 7, "gas": 8, "thermal": 9, "storage": 10, "others": 11,
+    }
+    sums = {k: 0.0 for k in COLS}
+    count = 0
+    for r in range(5, ws.max_row + 1):
+        time_val = ws.cell(row=r, column=1).value
+        if time_val is None:
+            continue
+        time_str = _excel_time_to_str(time_val) if not isinstance(time_val, str) else str(time_val).strip()
+        if not time_str or time_str.lower() == "time":
+            continue
+        for key, col in COLS.items():
+            cell_val = ws.cell(row=r, column=col).value
+            try:
+                val = float(cell_val) if cell_val is not None else 0.0
+                # Col 11 (Others) was used for total demand in pre-2026 PSP Excel formats.
+                if key == "others" and val > 20000:
+                    val = 0.0
+                sums[key] += val
+            except (ValueError, TypeError):
+                pass
+        count += 1
+    if count == 0:
+        return {}
+    return {k: round(sums[k] / count / 1000, 2) for k in COLS}
+
+
+_AVG_HEADER = [
+    "date",
+    "nuclear_avg_gw", "wind_avg_gw", "solar_avg_gw", "hydro_avg_gw",
+    "gas_avg_gw", "thermal_avg_gw", "storage_avg_gw", "others_avg_gw",
+    "total_avg_gw",
+]
+
+
+def _write_avg_daily_demand_csv(target_date: "date", avg_data: dict) -> bool:
+    csv_path = CSV_PATHS["avg_daily_demand"]
+    date_str = _format_date(target_date)
+
+    p = Path(csv_path)
+    if p.exists():
+        with open(p, newline="") as f:
+            for row in csv.reader(f):
+                if row and row[0].strip() == date_str:
+                    print(f"[AVG] {date_str} already in average_daily_demand.csv — skipping.")
+                    return True
+
+    row = [date_str] + [
+        avg_data.get(k, 0.0) for k in [
+            "nuclear", "wind", "solar", "hydro",
+            "gas", "thermal", "storage", "others", "total",
+        ]
+    ]
+    write_header = not p.exists() or p.stat().st_size == 0
+    with open(csv_path, "a", newline="") as f:
+        w = csv.writer(f)
+        if write_header:
+            w.writerow(_AVG_HEADER)
+        w.writerow(row)
+
+    print(f"[AVG] Wrote avg daily demand for {date_str}: total_avg={avg_data.get('total', 0):.2f} GW")
     return True
 
 
@@ -925,19 +1006,26 @@ def scrape_grid_india(target_date=None, excel_url=None, force=False) -> bool:
     else:
         print("[GRID-STATE] WARNING: No statewise data extracted — skipping statewise CSV.")
 
-    # Write demand_source.csv from TimeSeries sheet
+    # Write demand_source.csv and average_daily_demand.csv from TimeSeries sheet
     solar_time    = data.get("solar_peak_time", "")
     nonsolar_time = data.get("nonsolar_peak_time", "")
-    if solar_time or nonsolar_time:
-        ts_ws = _open_sheet(excel_bytes, "TimeSeries")
-        if ts_ws is not None:
+    ts_ws = _open_sheet(excel_bytes, "TimeSeries")
+    if ts_ws is not None:
+        if solar_time or nonsolar_time:
             ts_data = _parse_time_series(ts_ws)
             _write_demand_source_csv(target_date, solar_time, nonsolar_time, ts_data)
             wrote_any = True
         else:
-            print("[GRID-SRC] WARNING: Could not open TimeSeries sheet — skipping demand_source.csv.")
+            print("[GRID-SRC] WARNING: No solar/nonsolar peak times — skipping demand_source.csv.")
+        try:
+            avg_data = _compute_daily_averages(ts_ws)
+            if avg_data:
+                _write_avg_daily_demand_csv(target_date, avg_data)
+                wrote_any = True
+        except Exception as e:
+            print(f"[AVG] WARNING: avg_daily_demand write failed: {e}")
     else:
-        print("[GRID-SRC] WARNING: No solar/nonsolar peak times — skipping demand_source.csv.")
+        print("[GRID-SRC] WARNING: Could not open TimeSeries sheet — skipping demand_source + avg_daily_demand.")
 
     if wrote_any:
         print(f"[GRID] Done for {target_date}.")

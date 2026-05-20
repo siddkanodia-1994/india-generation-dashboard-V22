@@ -8,6 +8,7 @@ import LatestNews from "./LatestNews";
 import SummaryCard from "./SummaryCard";
 import StatewiseDemandCard from "./StatewiseDemandCard";
 import PeakDemandSourceCard from "./PeakDemandSourceCard";
+import AverageDailyDemandCard from "./AverageDailyDemandCard";
 
 export default function App() {
   return (
@@ -128,6 +129,7 @@ export default function App() {
                   <Tab>Solar Hours</Tab>
                   <Tab>Non-Solar Hours</Tab>
                   <Tab>Demand Source</Tab>
+                  <Tab>Avg Daily Demand</Tab>
                 </TabList>
               </div>
 
@@ -199,6 +201,11 @@ export default function App() {
               {/* Demand Source breakdown */}
               <TabPanel>
                 <PeakDemandSourceCard />
+              </TabPanel>
+
+              {/* Average Daily Demand */}
+              <TabPanel>
+                <AverageDailyDemandCard />
               </TabPanel>
             </Tabs>
           </TabPanel>

@@ -52,6 +52,7 @@ CSV_PATHS = {
     "stocks":    os.path.join(BASE_DIR, "public", "data", "stock.xlsx"),
     "statewise_demand": os.path.join(BASE_DIR, "public", "data", "statewise_demand.csv"),
     "demand_source":    os.path.join(BASE_DIR, "public", "data", "demand_source.csv"),
+    "avg_daily_demand": os.path.join(BASE_DIR, "public", "data", "average_daily_demand.csv"),
 }
 
 # ── IEX API base URLs ─────────────────────────────────────────────────────────

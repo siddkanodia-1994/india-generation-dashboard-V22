@@ -12,7 +12,7 @@ import {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const SOURCES = ["thermal", "solar", "wind", "hydro", "nuclear", "gas", "others"] as const;
+const SOURCES = ["thermal", "solar", "wind", "hydro", "nuclear", "gas", "storage", "others"] as const;
 type Source = typeof SOURCES[number];
 
 const SOURCE_LABELS: Record<Source, string> = {
@@ -22,6 +22,7 @@ const SOURCE_LABELS: Record<Source, string> = {
   hydro:   "Hydro",
   nuclear: "Nuclear",
   gas:     "Gas",
+  storage: "Storage",
   others:  "Others",
 };
 
@@ -32,6 +33,7 @@ const SOURCE_COLORS: Record<Source, string> = {
   hydro:   "#0369a1",
   nuclear: "#7c3aed",
   gas:     "#ea580c",
+  storage: "#0f766e",
   others:  "#64748b",
 };
 
@@ -169,7 +171,7 @@ function parseCsv(
 
   for (let i = 1; i < lines.length; i++) {
     const cols = lines[i].split(",").map(c => c.trim());
-    if (cols.length < 17) continue;
+    if (cols.length < 19) continue;
     const obj: Record<string, string> = {};
     header.forEach((h, idx) => { obj[h] = cols[idx] ?? ""; });
 
@@ -193,6 +195,7 @@ function parseCsv(
         hydro:   num("solar_hydro_gw"),
         gas:     num("solar_gas_gw"),
         thermal: num("solar_thermal_gw"),
+        storage: num("solar_storage_gw"),
         others:  num("solar_others_gw"),
       },
       nonsolar: {
@@ -202,6 +205,7 @@ function parseCsv(
         hydro:   num("nonsolar_hydro_gw"),
         gas:     num("nonsolar_gas_gw"),
         thermal: num("nonsolar_thermal_gw"),
+        storage: num("nonsolar_storage_gw"),
         others:  num("nonsolar_others_gw"),
       },
       solar_demand_gw:    peak?.solar    ?? null,
@@ -405,7 +409,10 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays, spotlightDateKe
 
 // ── PLF Card ──────────────────────────────────────────────────────────────────
 
-function PeakDemandPLFCard({ latestRow }: { latestRow: DemandSourceRow | null }) {
+function PeakDemandPLFCard({ rows }: { rows: DemandSourceRow[] }) {
+  const latest = rows.length > 0 ? rows[rows.length - 1] : null;
+  const [plfDate, setPlfDate] = useState<string | null>(null);
+  const kpiRow = plfDate ? (rows.find(r => r.dateKey === plfDate) ?? latest) : latest;
   const [capacity, setCapacity] = useState<Record<PLFSource, number>>(() => {
     try {
       const raw = localStorage.getItem(PLF_CAP_KEY);
@@ -464,15 +471,15 @@ function PeakDemandPLFCard({ latestRow }: { latestRow: DemandSourceRow | null })
 
   const solarGW = useMemo(() => {
     const out = {} as Record<PLFSource, number>;
-    for (const s of PLF_SOURCES) out[s] = latestRow?.solar[PLF_TO_DS[s]] ?? 0;
+    for (const s of PLF_SOURCES) out[s] = kpiRow?.solar[PLF_TO_DS[s]] ?? 0;
     return out;
-  }, [latestRow]);
+  }, [kpiRow]);
 
   const nonsolarGW = useMemo(() => {
     const out = {} as Record<PLFSource, number>;
-    for (const s of PLF_SOURCES) out[s] = latestRow?.nonsolar[PLF_TO_DS[s]] ?? 0;
+    for (const s of PLF_SOURCES) out[s] = kpiRow?.nonsolar[PLF_TO_DS[s]] ?? 0;
     return out;
-  }, [latestRow]);
+  }, [kpiRow]);
 
   const solarPLF = useMemo(() => {
     const out = {} as Record<PLFSource, number | null>;
@@ -486,31 +493,55 @@ function PeakDemandPLFCard({ latestRow }: { latestRow: DemandSourceRow | null })
     return out;
   }, [nonsolarGW, availCap]);
 
-  const solarDemand    = latestRow?.solar_demand_gw    ?? null;
-  const nonsolarDemand = latestRow?.nonsolar_demand_gw ?? null;
+  const solarDemand    = kpiRow?.solar_demand_gw    ?? null;
+  const nonsolarDemand = kpiRow?.nonsolar_demand_gw ?? null;
   const solarPLFTotal    = solarDemand    != null && availTotal > 0 ? (solarDemand    / availTotal) * 100 : null;
   const nonsolarPLFTotal = nonsolarDemand != null && availTotal > 0 ? (nonsolarDemand / availTotal) * 100 : null;
 
   const inputCls = "w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-right text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300 tabular-nums";
-  const latestDateLabel = latestRow?.dateLabel ?? "—";
+  const kpiDateLabel = kpiRow?.dateLabel ?? "—";
+  const isSpotlight = plfDate !== null && kpiRow?.dateKey !== latest?.dateKey;
 
   const fmtPLF = (v: number | null) => v === null ? "—" : `${v.toFixed(1)}%`;
 
   return (
     <div className="mt-6 bg-white rounded-2xl shadow-sm ring-1 ring-slate-200">
-      <div className="flex items-center justify-between border-b border-slate-100 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 p-4">
         <div>
           <div className="text-sm font-semibold text-slate-800">Peak Demand PLF</div>
           <div className="text-xs text-slate-500 mt-0.5">
-            Plant Load Factor at daily peak demand timestamp · {latestDateLabel}
+            Plant Load Factor at daily peak demand timestamp · {kpiDateLabel}
+            {isSpotlight && <span className="ml-1 text-blue-500 font-semibold">· selected</span>}
           </div>
         </div>
-        <button
-          onClick={loadFromCsv}
-          className="text-xs text-slate-500 hover:text-slate-700 border border-slate-200 rounded-lg px-2 py-1 bg-white hover:bg-slate-50"
-        >
-          Reset to CSV defaults
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5">
+            <span className="text-xs text-slate-400 whitespace-nowrap">Date</span>
+            <input
+              type="date"
+              value={plfDate ?? ""}
+              min={rows[0]?.dateKey}
+              max={latest?.dateKey}
+              onChange={e => setPlfDate(e.target.value || null)}
+              className="text-xs border border-slate-200 rounded-lg px-2 py-1 text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-400 cursor-pointer"
+            />
+            {plfDate && (
+              <button
+                onClick={() => setPlfDate(null)}
+                className="text-xs text-slate-400 hover:text-slate-600 px-1"
+                title="Clear date"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+          <button
+            onClick={loadFromCsv}
+            className="text-xs text-slate-500 hover:text-slate-700 border border-slate-200 rounded-lg px-2 py-1 bg-white hover:bg-slate-50"
+          >
+            Reset to CSV defaults
+          </button>
+        </div>
       </div>
 
       <div className="p-4">
@@ -603,7 +634,7 @@ function PeakDemandPLFCard({ latestRow }: { latestRow: DemandSourceRow | null })
                 <td className="px-3 py-2 font-semibold text-slate-800 text-xs">
                   GW at Peak — Solar Hours
                   <div className="text-[10px] font-normal text-slate-500 mt-0.5">
-                    {latestDateLabel} · {latestRow?.solar_time ?? "—"}
+                    {kpiDateLabel} · {kpiRow?.solar_time ?? "—"}
                   </div>
                 </td>
                 {PLF_SOURCES.map(s => (
@@ -621,7 +652,7 @@ function PeakDemandPLFCard({ latestRow }: { latestRow: DemandSourceRow | null })
                 <td className="px-3 py-2 font-semibold text-slate-800 text-xs">
                   GW at Peak — Non-Solar Hours
                   <div className="text-[10px] font-normal text-slate-500 mt-0.5">
-                    {latestDateLabel} · {latestRow?.nonsolar_time ?? "—"}
+                    {kpiDateLabel} · {kpiRow?.nonsolar_time ?? "—"}
                   </div>
                 </td>
                 {PLF_SOURCES.map(s => (
@@ -787,7 +818,7 @@ export default function PeakDemandSourceCard() {
       </div>
 
       {/* PLF card — latest date's source GW vs available capacity */}
-      <PeakDemandPLFCard latestRow={rows.length > 0 ? rows[rows.length - 1] : null} />
+      <PeakDemandPLFCard rows={rows} />
     </div>
   );
 }
