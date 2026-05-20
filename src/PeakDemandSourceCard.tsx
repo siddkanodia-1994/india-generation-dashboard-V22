@@ -69,32 +69,55 @@ const PLF_COL_LABELS: Record<PLFSource, string> = {
   "Bio Power": "Others†",
 };
 
-const PLF_CAP_KEY    = "peakDemandPLF_capacity";
 const PLF_MAINT_KEY  = "peakDemandPLF_maint";
 const DEFAULT_MAINT  = 5;
 const MAINT_PRESETS  = [0, 2, 5, 8, 10, 15, 20];
 
-async function fetchLatestCapacity(): Promise<Record<PLFSource, number>> {
+async function fetchCapacityForDate(dateKey: string): Promise<Record<PLFSource, number>> {
   const res = await fetch("/data/capacity.csv");
   if (!res.ok) throw new Error(`capacity.csv HTTP ${res.status}`);
   const text = await res.text();
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   if (lines.length < 2) throw new Error("empty capacity.csv");
   const header = lines[0].replace(/^﻿/, "").split(",").map(h => h.trim().toLowerCase());
-  const lastRow = lines[lines.length - 1].split(",").map(c => c.trim());
-  const col = (name: string) => {
-    const idx = header.indexOf(name.toLowerCase());
-    return idx >= 0 ? parseFloat(lastRow[idx] ?? "0") || 0 : 0;
-  };
-  return {
-    "Coal":      col("coal"),
-    "Oil & Gas": col("oil & gas"),
-    "Nuclear":   col("nuclear"),
-    "Hydro":     col("hydro") + col("small-hydro"),
-    "Solar":     col("solar"),
-    "Wind":      col("wind"),
-    "Bio Power": col("bio power"),
-  };
+
+  const targetMonth = dateKey.slice(0, 7); // "YYYY-MM"
+  type CapRow = Record<PLFSource, number>;
+  const entries: Array<[string, CapRow]> = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",").map(c => c.trim());
+    const parts = cols[0]?.split("/");
+    if (!parts || parts.length !== 3) continue;
+    const [, m, y] = parts.map(Number);
+    if (!m || !y) continue;
+    const year = y < 100 ? 2000 + y : y;
+    const monthKey = `${year}-${String(m).padStart(2, "0")}`;
+    const col = (name: string) => {
+      const idx = header.indexOf(name.toLowerCase());
+      return idx >= 0 ? parseFloat(cols[idx] ?? "0") || 0 : 0;
+    };
+    entries.push([monthKey, {
+      "Coal":      col("coal"),
+      "Oil & Gas": col("oil & gas"),
+      "Nuclear":   col("nuclear"),
+      "Hydro":     col("hydro") + col("small-hydro"),
+      "Solar":     col("solar"),
+      "Wind":      col("wind"),
+      "Bio Power": col("bio power"),
+    }]);
+  }
+
+  if (entries.length === 0) throw new Error("no capacity rows");
+  entries.sort((a, b) => a[0].localeCompare(b[0]));
+
+  // Last entry with monthKey <= targetMonth; fallback to most recent
+  let best = entries[entries.length - 1];
+  for (const entry of entries) {
+    if (entry[0] <= targetMonth) best = entry;
+    else break;
+  }
+  return best[1];
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -413,18 +436,9 @@ function PeakDemandPLFCard({ rows }: { rows: DemandSourceRow[] }) {
   const latest = rows.length > 0 ? rows[rows.length - 1] : null;
   const [plfDate, setPlfDate] = useState<string | null>(null);
   const kpiRow = plfDate ? (rows.find(r => r.dateKey === plfDate) ?? latest) : latest;
-  const [capacity, setCapacity] = useState<Record<PLFSource, number>>(() => {
-    try {
-      const raw = localStorage.getItem(PLF_CAP_KEY);
-      if (raw) {
-        const obj = JSON.parse(raw);
-        const out = Object.fromEntries(PLF_SOURCES.map(s => [s, 0])) as Record<PLFSource, number>;
-        for (const s of PLF_SOURCES) out[s] = Number(obj[s]) || 0;
-        if (PLF_SOURCES.some(s => out[s] !== 0)) return out;
-      }
-    } catch {}
-    return Object.fromEntries(PLF_SOURCES.map(s => [s, 0])) as Record<PLFSource, number>;
-  });
+  const [capacity, setCapacity] = useState<Record<PLFSource, number>>(
+    () => Object.fromEntries(PLF_SOURCES.map(s => [s, 0])) as Record<PLFSource, number>
+  );
 
   const [maint, setMaint] = useState<Record<PLFSource, number>>(() => {
     try {
@@ -439,22 +453,17 @@ function PeakDemandPLFCard({ rows }: { rows: DemandSourceRow[] }) {
     return Object.fromEntries(PLF_SOURCES.map(s => [s, DEFAULT_MAINT])) as Record<PLFSource, number>;
   });
 
-  const loadFromCsv = useCallback(async () => {
-    try {
-      const vals = await fetchLatestCapacity();
-      setCapacity(vals);
-    } catch {}
-  }, []);
+  const kpiMonth = kpiRow?.dateKey?.slice(0, 7) ?? null;
 
   useEffect(() => {
-    const allZero = PLF_SOURCES.every(s => capacity[s] === 0);
-    if (allZero) loadFromCsv();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!kpiMonth) return;
+    fetchCapacityForDate(kpiMonth).then(setCapacity).catch(() => {});
+  }, [kpiMonth]);
 
-  useEffect(() => {
-    try { localStorage.setItem(PLF_CAP_KEY, JSON.stringify(capacity)); } catch {}
-  }, [capacity]);
+  const reloadCapacity = useCallback(() => {
+    if (!kpiMonth) return;
+    fetchCapacityForDate(kpiMonth).then(setCapacity).catch(() => {});
+  }, [kpiMonth]);
 
   useEffect(() => {
     try { localStorage.setItem(PLF_MAINT_KEY, JSON.stringify(maint)); } catch {}
@@ -536,10 +545,10 @@ function PeakDemandPLFCard({ rows }: { rows: DemandSourceRow[] }) {
             )}
           </div>
           <button
-            onClick={loadFromCsv}
+            onClick={reloadCapacity}
             className="text-xs text-slate-500 hover:text-slate-700 border border-slate-200 rounded-lg px-2 py-1 bg-white hover:bg-slate-50"
           >
-            Reset to CSV defaults
+            Reload capacity
           </button>
         </div>
       </div>
