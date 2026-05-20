@@ -445,6 +445,7 @@ export default function AverageDailyDemandCard() {
   const [error, setError] = useState<string | null>(null);
   const [rangeDays, setRangeDays] = useState<number>(30);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [showPct, setShowPct] = useState(false);
 
   useEffect(() => {
     fetch("/data/average_daily_demand.csv")
@@ -539,6 +540,26 @@ export default function AverageDailyDemandCard() {
                 {opt.label}
               </button>
             ))}
+          </div>
+
+          {/* GW / % toggle */}
+          <div className="flex rounded-lg border border-gray-200 overflow-hidden">
+            <button
+              onClick={() => setShowPct(false)}
+              className={`px-3 py-1 text-xs font-medium transition-colors ${
+                !showPct ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              GW
+            </button>
+            <button
+              onClick={() => setShowPct(true)}
+              className={`px-3 py-1 text-xs font-medium transition-colors border-l border-gray-200 ${
+                showPct ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              %
+            </button>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-gray-400 whitespace-nowrap">Jump to</span>
@@ -647,7 +668,9 @@ export default function AverageDailyDemandCard() {
                   <td className="py-1.5 px-1 text-gray-700 font-medium">{r.dateLabel}</td>
                   {SOURCES.map(s => (
                     <td key={s} className="py-1.5 px-1 text-right font-mono text-gray-700">
-                      {r[s].toFixed(2)}
+                      {showPct
+                        ? (r.total > 0 ? (r[s] / r.total * 100).toFixed(1) + "%" : "—")
+                        : r[s].toFixed(2)}
                     </td>
                   ))}
                   <td className="py-1.5 px-1 text-right font-mono font-semibold text-gray-800">

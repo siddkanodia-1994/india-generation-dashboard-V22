@@ -248,9 +248,10 @@ interface PanelProps {
   period: "solar" | "nonsolar";
   rangeDays: number;
   spotlightDateKey: string | null;
+  showPct: boolean;
 }
 
-function SourcePanel({ title, subtitle, rows, period, rangeDays, spotlightDateKey }: PanelProps) {
+function SourcePanel({ title, subtitle, rows, period, rangeDays, spotlightDateKey, showPct }: PanelProps) {
   const filtered = useMemo(() => {
     if (rangeDays === 0) return rows;
     const cutoff = new Date();
@@ -405,6 +406,7 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays, spotlightDateKe
               {filtered.slice(-10).reverse().map(r => {
                 const official = period === "solar" ? r.solar_demand_gw : r.nonsolar_demand_gw;
                 const fallback = SOURCES.reduce((s, src) => s + (r[period][src] ?? 0), 0);
+                const demand = official ?? fallback;
                 return (
                   <tr key={r.dateKey} className="border-b border-gray-50 hover:bg-gray-50">
                     <td className="py-1.5 px-1 text-gray-700 font-medium">{r.dateLabel}</td>
@@ -413,11 +415,13 @@ function SourcePanel({ title, subtitle, rows, period, rangeDays, spotlightDateKe
                     </td>
                     {SOURCES.map(s => (
                       <td key={s} className="py-1.5 px-1 text-right font-mono text-gray-700">
-                        {r[period][s].toFixed(2)}
+                        {showPct
+                          ? (demand > 0 ? (r[period][s] / demand * 100).toFixed(1) + "%" : "—")
+                          : r[period][s].toFixed(2)}
                       </td>
                     ))}
                     <td className="py-1.5 px-1 text-right font-mono font-semibold text-gray-800">
-                      {(official ?? fallback).toFixed(2)}
+                      {demand.toFixed(2)}
                     </td>
                   </tr>
                 );
@@ -721,6 +725,7 @@ export default function PeakDemandSourceCard() {
   const [error, setError] = useState<string | null>(null);
   const [rangeDays, setRangeDays] = useState<number>(30);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [showPct, setShowPct] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -782,6 +787,26 @@ export default function PeakDemandSourceCard() {
             ))}
           </div>
 
+          {/* GW / % toggle */}
+          <div className="flex rounded-lg border border-gray-200 overflow-hidden">
+            <button
+              onClick={() => setShowPct(false)}
+              className={`px-3 py-1 text-xs font-medium transition-colors ${
+                !showPct ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              GW
+            </button>
+            <button
+              onClick={() => setShowPct(true)}
+              className={`px-3 py-1 text-xs font-medium transition-colors border-l border-gray-200 ${
+                showPct ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              %
+            </button>
+          </div>
+
           {/* Date picker */}
           <div className="flex items-center gap-1.5">
             <span className="text-xs text-gray-400 whitespace-nowrap">Jump to</span>
@@ -815,6 +840,7 @@ export default function PeakDemandSourceCard() {
           period="solar"
           rangeDays={rangeDays}
           spotlightDateKey={selectedDate}
+          showPct={showPct}
         />
         <SourcePanel
           title="Non-Solar Hours Peak"
@@ -823,6 +849,7 @@ export default function PeakDemandSourceCard() {
           period="nonsolar"
           rangeDays={rangeDays}
           spotlightDateKey={selectedDate}
+          showPct={showPct}
         />
       </div>
 
