@@ -70,8 +70,19 @@ const PLF_COL_LABELS: Record<PLFSource, string> = {
 };
 
 const PLF_MAINT_KEY = "peakDemandPLF_maint";
+const PLF_PCT_KEY   = "peakDemandPLF_plfPct";
 const DEFAULT_MAINT = 5;
 const MAINT_PRESETS = [0, 2, 5, 8, 10, 15, 20];
+
+const DEFAULT_PLF_PCT: Record<PLFSource, number> = {
+  "Coal":      85,
+  "Oil & Gas": 25,
+  "Nuclear":   85,
+  "Hydro":     40,
+  "Solar":     20,
+  "Wind":      25,
+  "Bio Power": 60,
+};
 
 async function fetchCapacityForDate(dateKey: string): Promise<Record<PLFSource, number>> {
   const res = await fetch("/data/capacity.csv");
@@ -222,6 +233,19 @@ function AvgDailyPLFCard({ rows }: { rows: AvgDailyRow[] }) {
     return Object.fromEntries(PLF_SOURCES.map(s => [s, DEFAULT_MAINT])) as Record<PLFSource, number>;
   });
 
+  const [plfPct, setPlfPct] = useState<Record<PLFSource, number>>(() => {
+    try {
+      const raw = localStorage.getItem(PLF_PCT_KEY);
+      if (raw) {
+        const obj = JSON.parse(raw);
+        const out = {} as Record<PLFSource, number>;
+        for (const s of PLF_SOURCES) out[s] = Number(obj[s]) ?? DEFAULT_PLF_PCT[s];
+        return out;
+      }
+    } catch {}
+    return { ...DEFAULT_PLF_PCT };
+  });
+
   const kpiMonth = kpiRow?.dateKey?.slice(0, 7) ?? null;
 
   useEffect(() => {
@@ -238,14 +262,25 @@ function AvgDailyPLFCard({ rows }: { rows: AvgDailyRow[] }) {
     try { localStorage.setItem(PLF_MAINT_KEY, JSON.stringify(maint)); } catch {}
   }, [maint]);
 
+  useEffect(() => {
+    try { localStorage.setItem(PLF_PCT_KEY, JSON.stringify(plfPct)); } catch {}
+  }, [plfPct]);
+
   const availCap = useMemo(() => {
     const out = {} as Record<PLFSource, number>;
     for (const s of PLF_SOURCES) out[s] = capacity[s] * (1 - maint[s] / 100);
     return out;
   }, [capacity, maint]);
 
+  const ratedCap = useMemo(() => {
+    const out = {} as Record<PLFSource, number>;
+    for (const s of PLF_SOURCES) out[s] = capacity[s] * plfPct[s] / 100;
+    return out;
+  }, [capacity, plfPct]);
+
   const capTotal   = PLF_SOURCES.reduce((sum, s) => sum + (capacity[s] || 0), 0);
   const availTotal = PLF_SOURCES.reduce((sum, s) => sum + availCap[s], 0);
+  const ratedTotal = PLF_SOURCES.reduce((sum, s) => sum + ratedCap[s], 0);
 
   const avgGW = useMemo(() => {
     const out = {} as Record<PLFSource, number>;
@@ -260,7 +295,7 @@ function AvgDailyPLFCard({ rows }: { rows: AvgDailyRow[] }) {
   }, [avgGW, availCap]);
 
   const totalGW  = kpiRow?.total ?? null;
-  const totalPLF = totalGW != null && availTotal > 0 ? (totalGW / availTotal) * 100 : null;
+  const totalPLF = totalGW != null && ratedTotal > 0 ? (totalGW / ratedTotal) * 100 : null;
 
   const inputCls = "w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-right text-sm text-slate-900 outline-none focus:ring-2 focus:ring-slate-300 tabular-nums";
   const kpiDateLabel = kpiRow?.dateLabel ?? "—";
@@ -392,7 +427,48 @@ function AvgDailyPLFCard({ rows }: { rows: AvgDailyRow[] }) {
                 <td className="px-3 py-2 text-right text-slate-500 text-sm">—</td>
               </tr>
 
-              {/* Row 3: Avg Daily GW */}
+              {/* Row 3: PLF % */}
+              <tr className="border-t border-slate-100">
+                <td className="px-3 py-2 text-xs">
+                  <div className="font-semibold text-slate-800">PLF (%)</div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">Used to derive rated capacity</div>
+                </td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-2 py-1.5">
+                    <input
+                      type="number"
+                      step="1"
+                      min="0"
+                      max="100"
+                      value={plfPct[s]}
+                      onChange={e => {
+                        const v = Math.min(100, Math.max(0, parseFloat(e.target.value) || 0));
+                        setPlfPct(prev => ({ ...prev, [s]: v }));
+                      }}
+                      className={inputCls}
+                    />
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right text-slate-500 text-sm">—</td>
+              </tr>
+
+              {/* Row 4: Rated Capacity */}
+              <tr className="border-t border-slate-100 bg-slate-50/60">
+                <td className="px-3 py-2 text-xs">
+                  <div className="font-semibold text-slate-800">Rated Capacity (GW)</div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">Installed × PLF% · total = denominator for Total PLF%</div>
+                </td>
+                {PLF_SOURCES.map(s => (
+                  <td key={s} className="px-3 py-2 text-right font-mono text-sm text-slate-600 tabular-nums">
+                    {ratedCap[s].toFixed(1)}
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-right font-semibold tabular-nums text-slate-900 text-sm">
+                  {ratedTotal.toFixed(1)}
+                </td>
+              </tr>
+
+              {/* Row 5: Avg Daily GW */}
               <tr className="border-t border-slate-100 bg-blue-50/40">
                 <td className="px-3 py-2 font-semibold text-slate-800 text-xs">
                   Avg Daily GW
@@ -427,7 +503,8 @@ function AvgDailyPLFCard({ rows }: { rows: AvgDailyRow[] }) {
         </div>
 
         <div className="mt-3 space-y-0.5 text-[11px] text-slate-500">
-          <div>Avg Daily PLF% = Avg Daily GW ÷ (Installed Capacity × (1 − Maintenance%/100)) × 100. Capacity and maintenance values are editable and saved in your browser (shared with Demand Source tab).</div>
+          <div>Per-source PLF% = Avg Daily GW ÷ (Installed Capacity × (1 − Maintenance%/100)) × 100.</div>
+          <div>Total PLF% = Total Avg Daily GW ÷ Rated Capacity total (Installed × PLF%) × 100. PLF%, capacity, and maintenance values are editable and saved in your browser (shared with Demand Source tab).</div>
           <div>Total GW = column C daily average from Grid India TimeSeries (includes net exports/imports); source columns sum may differ slightly.</div>
           <div>* Hydro column combines Hydro and Small-Hydro installed capacity from capacity.csv; GW = combined hydro avg output.</div>
           <div>† Others/Bio Power column = residual "Others" category (column K); values before mid-2025 show 0.0 due to PSP Excel format change.</div>
