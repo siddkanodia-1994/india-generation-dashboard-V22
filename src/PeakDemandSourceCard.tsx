@@ -509,9 +509,9 @@ function PeakDemandPLFCard({ rows }: { rows: DemandSourceRow[] }) {
 
   const ratedCap = useMemo(() => {
     const out = {} as Record<PLFSource, number>;
-    for (const s of PLF_SOURCES) out[s] = capacity[s] * plfPct[s] / 100;
+    for (const s of PLF_SOURCES) out[s] = capacity[s] * (1 - maint[s] / 100) * plfPct[s] / 100;
     return out;
-  }, [capacity, plfPct]);
+  }, [capacity, maint, plfPct]);
 
   const capTotal   = PLF_SOURCES.reduce((sum, s) => sum + (capacity[s] || 0), 0);
   const availTotal = PLF_SOURCES.reduce((sum, s) => sum + availCap[s], 0);
@@ -706,7 +706,7 @@ function PeakDemandPLFCard({ rows }: { rows: DemandSourceRow[] }) {
               <tr className="border-t border-slate-100 bg-slate-50/60">
                 <td className="px-3 py-2 text-xs">
                   <div className="font-semibold text-slate-800">Rated Capacity (GW)</div>
-                  <div className="text-[10px] text-slate-500 mt-0.5">Installed × PLF% · total = denominator for Total PLF%</div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">Installed × (1−Maint%) × PLF% · total = denominator for Total PLF%</div>
                 </td>
                 {PLF_SOURCES.map(s => (
                   <td key={s} className="px-3 py-2 text-right font-mono text-sm text-slate-600 tabular-nums">
@@ -785,7 +785,7 @@ function PeakDemandPLFCard({ rows }: { rows: DemandSourceRow[] }) {
 
         <div className="mt-3 space-y-0.5 text-[11px] text-slate-500">
           <div>Per-source PLF% = GW at Peak ÷ (Installed Capacity × (1 − Maintenance%/100)) × 100.</div>
-          <div>Total PLF% = Demand Met ÷ Rated Capacity total (Installed × PLF%) × 100. PLF%, capacity, and maintenance values are editable and saved in your browser.</div>
+          <div>Total PLF% = Demand Met ÷ Rated Capacity total (Installed × (1−Maint%) × PLF%) × 100. PLF%, capacity, and maintenance values are editable and saved in your browser.</div>
           <div>* Hydro column combines Hydro and Small-Hydro installed capacity from capacity.csv; GW = combined hydro output from Grid India TimeSeries.</div>
           <div>† Others/Bio Power column = residual "Others" category from Grid India TimeSeries, which includes Bio Power and other minor sources.</div>
         </div>
