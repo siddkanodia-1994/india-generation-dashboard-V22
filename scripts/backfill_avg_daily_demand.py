@@ -142,7 +142,7 @@ def backfill(start: Optional[date], end: Optional[date], test_mode: bool = False
             skipped += 1
             continue
 
-        avg_data = _compute_daily_averages(ts_ws)
+        avg_data = _compute_daily_averages(ts_ws, target)
         if not avg_data:
             print(f"  [{target}] Empty TimeSeries data — skipping.")
             failed += 1

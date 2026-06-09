@@ -151,7 +151,7 @@ def backfill(start: Optional[date], end: Optional[date], test_mode: bool = False
             failed += 1
             continue
 
-        ts_data = _parse_time_series(ts_ws)
+        ts_data = _parse_time_series(ts_ws, target)
         ok = _write_demand_source_csv(target, solar_t, nonsolar_t, ts_data)
         if ok:
             success += 1
