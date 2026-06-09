@@ -718,18 +718,25 @@ def _round_to_15min(time_str: str) -> str:
         return time_str
 
 
-def _parse_time_series(ws: "_SheetAdapter") -> dict:
+def _parse_time_series(ws: "_SheetAdapter", target_date: "date") -> dict:
     """
     Read the TimeSeries sheet (96 rows of 15-min data).
     Returns {time_str: {source: mw_value}} for each row.
     Data rows start at row 5 (1-based); headers are rows 1-4.
-    Column layout (1-based): TIME=1, TOTAL=3, NUCLEAR=4, WIND=5, SOLAR=6,
+    Pre-June-1-2026 layout  (1-based): TIME=1, TOTAL=3, NUCLEAR=4, WIND=5, SOLAR=6,
     HYDRO=7, GAS=8, THERMAL=9, STORAGE=10 (PSP+BESS), OTHERS=11
+    From June-1-2026: a new col D (STORAGE DEMAND PSP&BESS) shifts every source col by +1.
     """
-    SOURCE_COLS = {
-        "nuclear": 4, "wind": 5, "solar": 6,
-        "hydro": 7, "gas": 8, "thermal": 9, "storage": 10, "others": 11,
-    }
+    if target_date >= date(2026, 6, 1):
+        SOURCE_COLS = {
+            "nuclear": 5, "wind": 6, "solar": 7,
+            "hydro": 8, "gas": 9, "thermal": 10, "storage": 11, "others": 12,
+        }
+    else:
+        SOURCE_COLS = {
+            "nuclear": 4, "wind": 5, "solar": 6,
+            "hydro": 7, "gas": 8, "thermal": 9, "storage": 10, "others": 11,
+        }
     ts = {}
     for r in range(5, ws.max_row + 1):
         raw_val = ws.cell(row=r, column=1).value
@@ -820,17 +827,24 @@ def _write_demand_source_csv(
 
 # ── Average Daily Demand (TimeSeries daily averages) ─────────────────────────
 
-def _compute_daily_averages(ws: "_SheetAdapter") -> dict:
+def _compute_daily_averages(ws: "_SheetAdapter", target_date: "date") -> dict:
     """
     Average all 96 15-min rows in the TimeSeries sheet.
     Returns {key: avg_gw} for total + 8 sources.
-    Column layout (1-based): TOTAL=3, NUCLEAR=4, WIND=5, SOLAR=6,
+    Pre-June-1-2026 layout  (1-based): TOTAL=3, NUCLEAR=4, WIND=5, SOLAR=6,
     HYDRO=7, GAS=8, THERMAL=9, STORAGE=10, OTHERS=11
+    From June-1-2026: new col D shifts every source col by +1.
     """
-    COLS = {
-        "total": 3, "nuclear": 4, "wind": 5, "solar": 6,
-        "hydro": 7, "gas": 8, "thermal": 9, "storage": 10, "others": 11,
-    }
+    if target_date >= date(2026, 6, 1):
+        COLS = {
+            "total": 3, "nuclear": 5, "wind": 6, "solar": 7,
+            "hydro": 8, "gas": 9, "thermal": 10, "storage": 11, "others": 12,
+        }
+    else:
+        COLS = {
+            "total": 3, "nuclear": 4, "wind": 5, "solar": 6,
+            "hydro": 7, "gas": 8, "thermal": 9, "storage": 10, "others": 11,
+        }
     sums = {k: 0.0 for k in COLS}
     count = 0
     for r in range(5, ws.max_row + 1):
@@ -1012,13 +1026,13 @@ def scrape_grid_india(target_date=None, excel_url=None, force=False) -> bool:
     ts_ws = _open_sheet(excel_bytes, "TimeSeries")
     if ts_ws is not None:
         if solar_time or nonsolar_time:
-            ts_data = _parse_time_series(ts_ws)
+            ts_data = _parse_time_series(ts_ws, target_date)
             _write_demand_source_csv(target_date, solar_time, nonsolar_time, ts_data)
             wrote_any = True
         else:
             print("[GRID-SRC] WARNING: No solar/nonsolar peak times — skipping demand_source.csv.")
         try:
-            avg_data = _compute_daily_averages(ts_ws)
+            avg_data = _compute_daily_averages(ts_ws, target_date)
             if avg_data:
                 _write_avg_daily_demand_csv(target_date, avg_data)
                 wrote_any = True
