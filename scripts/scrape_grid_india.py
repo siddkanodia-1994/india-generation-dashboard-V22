@@ -170,21 +170,35 @@ def _find_excel_url_via_cdn_probe(target_date: date):
     N is unknown but observed up to 929; probing 1-1499 for safety margin.
     Both .xls and .xlsx extensions are tried (Grid India uses both).
     With 50 concurrent workers this typically completes in under 5 seconds.
+
+    Grid India CDN organises files by *publish date*, not *data date*. End-of-month
+    reports (e.g. June 30) are often published the next day (July 1) and therefore
+    stored in the next month's CDN folder. We probe both the data-month folder and
+    the following month's folder to handle this.
     """
     import concurrent.futures
     import threading
+    import calendar
 
-    year        = target_date.strftime("%Y")
-    month       = target_date.strftime("%m")
     date_prefix = target_date.strftime("%d.%m.%y")
-    base        = f"{_GRID_CDN_BASE}/files/grdw/{year}/{month}/{date_prefix}_NLDC_PSP"
 
-    print(f"[GRID] Probing CDN for {date_prefix} (N=1–1499, .xls/.xlsx, 50 workers)...")
+    # Build candidate CDN base URLs: data month + next month (publish-date skew)
+    def _base_for(yr, mo):
+        return f"{_GRID_CDN_BASE}/files/grdw/{yr}/{mo:02d}/{date_prefix}_NLDC_PSP"
+
+    next_month_date = (target_date.replace(day=1) + timedelta(days=32)).replace(day=1)
+    candidate_bases = [
+        _base_for(target_date.year, target_date.month),
+        _base_for(next_month_date.year, next_month_date.month),
+    ]
+
+    print(f"[GRID] Probing CDN for {date_prefix} (N=1–1499, .xls/.xlsx, 50 workers, 2 month folders)...")
 
     found  = threading.Event()
     result = [None]
 
-    def check(n):
+    def check(args):
+        base, n = args
         if found.is_set():
             return
         for ext in (".xlsx", ".xls"):          # try .xlsx first (newer files)
@@ -201,8 +215,9 @@ def _find_excel_url_via_cdn_probe(target_date: date):
             except Exception:
                 pass
 
+    tasks = [(base, n) for base in candidate_bases for n in range(1, 1500)]
     with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
-        executor.map(check, range(1, 1500))
+        executor.map(check, tasks)
 
     if result[0]:
         print(f"[GRID] CDN probe found: {result[0]}")
