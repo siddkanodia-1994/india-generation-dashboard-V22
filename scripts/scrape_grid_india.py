@@ -178,7 +178,6 @@ def _find_excel_url_via_cdn_probe(target_date: date):
     """
     import concurrent.futures
     import threading
-    import calendar
 
     date_prefix = target_date.strftime("%d.%m.%y")
 
